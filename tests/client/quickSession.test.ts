@@ -195,7 +195,7 @@ describe('QuickSession', () => {
   it('reports a lost connection when a dropped path never comes back', async () => {
     const { host, guest } = await pairDevices();
     network.dropLinks();
-    await settle(24_000);
+    await settle(44_000);
     expect(host.state).toMatchObject({ phase: 'connected', reconnecting: true });
     await settle(2_000);
     for (const device of [host, guest]) {

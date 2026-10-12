@@ -154,7 +154,13 @@ export function apiUpload(
   });
 }
 
-/** Retries `operation` with exponential backoff while the error is retryable. */
+const MAX_RETRY_DELAY_MS = 15_000;
+
+/**
+ * Retries `operation` with exponential backoff while the error is retryable.
+ * A server that asks to come back later than the longest delay (storage
+ * full, monthly allowance used up) gets no retry: the error is final now.
+ */
 export async function withRetry<T>(
   operation: (attempt: number) => Promise<T>,
   options: { attempts?: number; signal?: AbortSignal; baseDelayMs?: number } = {},
@@ -168,10 +174,11 @@ export async function withRetry<T>(
       lastError = error;
       if (!(error instanceof HttpError) || !error.retryable || attempt === attempts - 1)
         throw error;
+      const retryAfterMs = (error.retryAfterSeconds ?? 0) * 1000;
+      if (retryAfterMs > MAX_RETRY_DELAY_MS) throw error;
       if (options.signal?.aborted) throw new HttpError('aborted', 0, 'Request aborted');
       const backoff = (options.baseDelayMs ?? 600) * 2 ** attempt + Math.random() * 250;
-      const delay = Math.max(backoff, (error.retryAfterSeconds ?? 0) * 1000);
-      await sleep(Math.min(delay, 15_000), options.signal);
+      await sleep(Math.min(Math.max(backoff, retryAfterMs), MAX_RETRY_DELAY_MS), options.signal);
     }
   }
   throw lastError;

@@ -17,6 +17,7 @@ import {
   ConnectionIcon,
   DownloadIcon,
   ErrorIcon,
+  LockIcon,
   QrIcon,
   RelayIcon,
 } from '../../icons';
@@ -28,12 +29,14 @@ import {
   formatDuration,
   formatPercent,
   formatSpeed,
+  formatTtl,
 } from '../../lib/format';
 import type { RateEstimate } from '../../lib/rateMeter';
 import type { CandidateSummary, ConnectionDiagnostics } from '../../transfer/diagnostics';
 import type { ReceivedFile, TransferSnapshot } from '../../transfer/engine';
 import type { ConnectionRoute } from '../../transfer/peerLink';
-import type { QuickSessionInfo } from '../../transfer/quickSession';
+import type { QuickSessionInfo, QuickState } from '../../transfer/quickSession';
+import { relayLimitProblem } from '../../transfer/relay';
 import { Button } from '../../ui/Button';
 import { FileListFrame, FileRow } from '../../ui/FileRow';
 import { ProgressBar } from '../../ui/ProgressBar';
@@ -197,17 +200,67 @@ export function ApprovalPrompt({
   );
 }
 
-/** "Connecting…", turning into a patience note when it takes a while (other networks, retries). */
-export function ConnectingStatus({ device }: { device: string }) {
+/**
+ * "Connecting…", turning into a patience note when it takes a while (other
+ * networks, retries) — and offering `slowAction` then, if given. `viaServer`:
+ * relay mode is being set up instead of a direct connection.
+ */
+export function ConnectingStatus({
+  device,
+  viaServer = false,
+  slowAction,
+}: {
+  device: string;
+  viaServer?: boolean;
+  slowAction?: ReactNode;
+}) {
   const { t } = useI18n();
   const [since] = useState(() => Date.now());
   const now = useNow(1000);
+  const slow = now - since > 8_000;
+  if (viaServer)
+    return (
+      <StatusBlock
+        busy
+        title={t('quick.connectingServer', { device })}
+        detail={t('quick.connectingServerHint')}
+      />
+    );
   return (
     <StatusBlock
       busy
       title={t('quick.connecting', { device })}
-      detail={now - since > 8_000 ? t('quick.connectingSlow') : t('quick.connectingHint')}
-    />
+      detail={slow ? t('quick.connectingSlow') : t('quick.connectingHint')}
+    >
+      {slow && slowAction ? <div className={styles.buttons}>{slowAction}</div> : null}
+    </StatusBlock>
+  );
+}
+
+/**
+ * Under "Send through preprati.": what happens to the files (or, when the
+ * selection is over the limits, why the option is missing).
+ */
+export function RelayNote({
+  device,
+  relay,
+  files,
+}: {
+  device: string;
+  relay: NonNullable<QuickState['relay']>;
+  files: readonly File[];
+}) {
+  const { t, locale } = useI18n();
+  const tooLarge = relayLimitProblem(files, relay.limits) !== null;
+  return (
+    <p className={`${styles.note} ${styles.relayNote}`}>
+      <LockIcon size={16} />
+      <span>
+        {tooLarge
+          ? t('quick.relayTooLarge', { size: formatBytes(relay.limits.maxPackageBytes, locale) })
+          : t('quick.relayNote', { device, time: formatTtl(relay.ttlSeconds, locale) })}
+      </span>
+    </p>
   );
 }
 
@@ -243,6 +296,14 @@ export function ConnectionDetails({ diagnostics }: { diagnostics: ConnectionDiag
       describe(remote, remote.host + remote.srflx + remote.relay > 0),
     ],
     [
+      t('quick.details.network'),
+      diagnostics.sameNetwork
+        ? t('quick.details.networkSame')
+        : local.srflx > 0 && remote.srflx > 0
+          ? t('quick.details.networkDifferent')
+          : t('quick.details.networkUnknown'),
+    ],
+    [
       t('quick.details.relay'),
       diagnostics.turnServers > 0
         ? t('quick.details.relayAvailable')
@@ -276,17 +337,17 @@ export function ConnectionDetails({ diagnostics }: { diagnostics: ConnectionDiag
 export function ConnectionBadge({ route }: { route: ConnectionRoute | null }) {
   const { t } = useI18n();
   if (!route || route === 'unknown') return null;
-  const relay = route === 'relay';
+  const [Icon, label, hint] =
+    route === 'server'
+      ? [LockIcon, t('quick.routeServer'), t('quick.routeServerHint')]
+      : route === 'relay'
+        ? [RelayIcon, t('quick.routeRelay'), t('quick.routeRelayHint')]
+        : [ConnectionIcon, t('quick.routeDirect'), t('quick.routeDirectHint')];
   return (
-    <p
-      className={styles.badge}
-      title={relay ? t('quick.routeRelayHint') : t('quick.routeDirectHint')}
-    >
-      {relay ? <RelayIcon size={16} /> : <ConnectionIcon size={16} />}
-      <span>{relay ? t('quick.routeRelay') : t('quick.routeDirect')}</span>
-      <span className="visually-hidden">
-        . {relay ? t('quick.routeRelayHint') : t('quick.routeDirectHint')}
-      </span>
+    <p className={styles.badge} title={hint}>
+      <Icon size={16} />
+      <span>{label}</span>
+      <span className="visually-hidden">. {hint}</span>
     </p>
   );
 }
@@ -308,13 +369,24 @@ export function TransferProgress({
   const total = formatBytes(transfer.totalBytes, locale);
   const percent = formatPercent(fraction, locale);
   const outgoing = transfer.direction === 'outgoing';
+  // Relay mode moves the files in two legs: the sender uploads, then the receiver downloads.
+  const title =
+    transfer.stage === 'upload'
+      ? outgoing
+        ? t('quick.relayUploading', { device })
+        : t('quick.relayPeerUploading', { device })
+      : transfer.stage === 'download'
+        ? outgoing
+          ? t('quick.relayPeerDownloading', { device })
+          : t('quick.relayDownloading', { device })
+        : outgoing
+          ? t('quick.sending', { device })
+          : t('quick.receiving', { device });
 
   return (
     <div className={styles.transfer}>
       <div className={styles.transferHead}>
-        <p className={styles.statusTitle}>
-          {outgoing ? t('quick.sending', { device }) : t('quick.receiving', { device })}
-        </p>
+        <p className={styles.statusTitle}>{title}</p>
         <p className={styles.percent} aria-hidden="true">
           {percent}
         </p>
@@ -438,7 +510,19 @@ export function TransferDone({ title, children }: { title: string; children?: Re
   );
 }
 
-export function QuickError({ view, actions }: { view: QuickErrorView; actions: ReactNode }) {
+export function QuickError({
+  view,
+  device,
+  actions,
+  note,
+}: {
+  view: QuickErrorView;
+  /** The other device's name, for messages that mention it. */
+  device: string;
+  actions: ReactNode;
+  /** Shown under the buttons (e.g. what "Send through preprati." does). */
+  note?: ReactNode;
+}) {
   const { t } = useI18n();
   const diagnostics = view.connection?.diagnostics;
   return (
@@ -449,11 +533,12 @@ export function QuickError({ view, actions }: { view: QuickErrorView; actions: R
         </span>
         <div>
           <p className={styles.statusTitle}>{t(view.title)}</p>
-          <p className={styles.statusDetail}>{t(view.message)}</p>
-          {view.hint ? <p className={styles.statusDetail}>{t(view.hint)}</p> : null}
+          <p className={styles.statusDetail}>{t(view.message, { device })}</p>
+          {view.hint ? <p className={styles.statusDetail}>{t(view.hint, { device })}</p> : null}
         </div>
       </div>
       <div className={styles.buttons}>{actions}</div>
+      {note}
       {diagnostics ? <ConnectionDetails diagnostics={diagnostics} /> : null}
     </div>
   );

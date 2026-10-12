@@ -19,15 +19,18 @@ import {
   PairingTicket,
   QuickError,
   ReconnectingNotice,
+  RelayNote,
   StatusBlock,
   TransferDone,
   TransferProgress,
 } from '../features/quick/panels';
+import { useSessionWakeLock } from '../features/quick/wakeLock';
 import { useI18n } from '../i18n';
-import { LinkIcon, RetryIcon, SendIcon } from '../icons';
+import { LinkIcon, LockIcon, RetryIcon, SendIcon } from '../icons';
 import { localFileId, type SelectedFile } from '../lib/files';
 import { handOffFiles } from '../lib/handoff';
 import { QuickSession, type QuickState } from '../transfer/quickSession';
+import { relayLimitProblem } from '../transfer/relay';
 import { Button } from '../ui/Button';
 import styles from './QuickScreens.module.css';
 
@@ -45,6 +48,7 @@ export default function SendScreen() {
   const phase = state?.phase ?? 'idle';
   const locked = phase === 'awaiting-acceptance' || phase === 'transferring';
   useLeaveWarning(locked);
+  useSessionWakeLock(state);
 
   // A session starts as soon as there is something to send.
   useEffect(() => {
@@ -96,10 +100,27 @@ export default function SendScreen() {
         ),
       };
     }
+    const selected = files.map((entry) => entry.file);
+    // "Send through preprati." needs a selection within the storage limits.
+    const relayFits =
+      !!state.relay &&
+      selected.length > 0 &&
+      relayLimitProblem(selected, state.relay.limits) === null;
+    const relayButton = (
+      variant: 'primary' | 'inverse',
+      label: 'relaySend' | 'relaySendInstead',
+    ) => (
+      <Button variant={variant} icon={LockIcon} onClick={() => session.useRelay()}>
+        {t(`quick.${label}`)}
+      </Button>
+    );
     const error = describeQuickError(state, { shareAvailable });
     if (error) {
       const retry = error.connection?.canRetry === true;
-      const offerLink = !!error.connection && shareAvailable && files.length > 0;
+      const canRelay = error.connection?.canRelay === true;
+      const offerRelay = canRelay && relayFits;
+      // Without relay mode (no signaling left), a share link still gets the files there.
+      const offerLink = !!error.connection && !canRelay && shareAvailable && files.length > 0;
       const actions =
         error.recovery === 'retry-send' ? (
           <Button variant="primary" onClick={sendNow} disabled={files.length === 0}>
@@ -107,8 +128,13 @@ export default function SendScreen() {
           </Button>
         ) : (
           <>
+            {offerRelay ? relayButton('primary', 'relaySend') : null}
             {retry ? (
-              <Button variant="primary" icon={RetryIcon} onClick={() => session.retryConnection()}>
+              <Button
+                variant={offerRelay ? 'inverse' : 'primary'}
+                icon={RetryIcon}
+                onClick={() => session.retryConnection()}
+              >
                 {t('quick.tryAgain')}
               </Button>
             ) : null}
@@ -119,7 +145,7 @@ export default function SendScreen() {
             ) : null}
             {error.recovery === 'restart' ? (
               <Button
-                variant={retry || offerLink ? 'ghost' : 'primary'}
+                variant={retry || offerLink || offerRelay ? 'ghost' : 'primary'}
                 onClick={() => void session.host('sender')}
               >
                 {t('quick.newSession')}
@@ -131,9 +157,13 @@ export default function SendScreen() {
             )}
           </>
         );
+      const note =
+        canRelay && state.relay ? (
+          <RelayNote device={device} relay={state.relay} files={selected} />
+        ) : null;
       return {
-        key: `error-${error.message}-${retry}`,
-        node: <QuickError view={error} actions={actions} />,
+        key: `error-${error.message}-${retry}-${offerRelay}`,
+        node: <QuickError view={error} device={device} actions={actions} note={note} />,
       };
     }
     if (
@@ -190,7 +220,18 @@ export default function SendScreen() {
         };
       case 'peer-connected':
       case 'connecting':
-        return { key: 'connecting', node: <ConnectingStatus device={device} /> };
+        return {
+          key: state.route === 'server' ? 'connecting-server' : 'connecting',
+          node: (
+            <ConnectingStatus
+              device={device}
+              viaServer={state.route === 'server'}
+              slowAction={
+                state.canRelay && relayFits ? relayButton('inverse', 'relaySendInstead') : null
+              }
+            />
+          ),
+        };
       case 'connected':
         return {
           key: 'connected',

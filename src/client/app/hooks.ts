@@ -51,6 +51,59 @@ export function useNow(intervalMs = 1000, enabled = true): number {
   return now;
 }
 
+const NOT_IDLE = Symbol('not idle');
+
+/**
+ * Keeps the screen on while `active` (Screen Wake Lock API): a phone that
+ * locks its screen suspends the page, and with it a pairing or a transfer in
+ * progress. Browsers drop the lock whenever the page is hidden; it is taken
+ * again when the page comes back (or at the next tap, for browsers that only
+ * grant it after a user gesture). After `idleMs` without a change of
+ * `activity` the lock is let go, so a forgotten page doesn't keep the screen
+ * on for good. Without the API (older browsers) this does nothing.
+ */
+export function useWakeLock(active: boolean, activity: unknown, idleMs = 5 * 60_000): void {
+  const [idleSince, setIdleSince] = useState<unknown>(NOT_IDLE);
+  useEffect(() => {
+    if (!active) return;
+    const timer = setTimeout(() => setIdleSince(activity), idleMs);
+    return () => clearTimeout(timer);
+  }, [active, activity, idleMs]);
+  const enabled = active && !Object.is(idleSince, activity);
+
+  useEffect(() => {
+    const wakeLock = typeof navigator !== 'undefined' ? navigator.wakeLock : undefined;
+    if (!enabled || !wakeLock) return;
+    let sentinel: WakeLockSentinel | null = null;
+    let requesting = false;
+    let stopped = false;
+    const acquire = () => {
+      if (stopped || requesting || document.visibilityState !== 'visible') return;
+      if (sentinel && !sentinel.released) return;
+      requesting = true;
+      wakeLock
+        .request('screen')
+        .then((lock) => {
+          if (stopped) void lock.release().catch(() => undefined);
+          else sentinel = lock;
+        })
+        .catch(() => undefined) // not allowed right now (battery saver, hidden page, no gesture)
+        .finally(() => {
+          requesting = false;
+        });
+    };
+    acquire();
+    document.addEventListener('visibilitychange', acquire);
+    document.addEventListener('pointerdown', acquire, { passive: true });
+    return () => {
+      stopped = true;
+      document.removeEventListener('visibilitychange', acquire);
+      document.removeEventListener('pointerdown', acquire);
+      void sentinel?.release().catch(() => undefined);
+    };
+  }, [enabled]);
+}
+
 /** Asks the browser to confirm before leaving while `active` (e.g. mid-transfer). */
 export function useLeaveWarning(active: boolean): void {
   useEffect(() => {

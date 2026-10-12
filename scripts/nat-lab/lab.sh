@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# NAT lab: two devices on two separate NATed networks, a public server with
-# preprati. + STUN (+ an optional TURN relay), all in local Docker networks.
+# NAT lab: two devices on two separate NATed networks (or both on one), a
+# public server with preprati. + STUN (+ an optional TURN relay), all in local
+# Docker networks.
 # It runs the real production build in real Chrome, so cross-network behaviour
 # can be tested without two physical networks. See docs/CONNECTIVITY.md.
 #
@@ -17,6 +18,7 @@
 #   wan   198.18.0.0/24   server .2 (app + STUN), STUN #2 .3, TURN .4, NAT A .11, NAT B .12
 #   lan-a 10.71.1.0/24    device A .2 → NAT A .254 (internal network, no other way out)
 #   lan-b 10.71.2.0/24    device B .2 → NAT B .254
+#   (scenario 8 also puts device B on lan-a as .3, behind NAT A)
 set -uo pipefail
 
 PROJECT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -40,7 +42,7 @@ up() {
       docker network create --internal --subnet 10.71.$n.0/24 $P-lan-$side >/dev/null
   done
   exists $P-server || docker run -d --name $P-server --network $P-wan --ip 198.18.0.2 \
-    -v /:/host:ro alpine sleep infinity >/dev/null
+    -v /:/host:ro -v "$RESULTS:/host/tmp" alpine sleep infinity >/dev/null
   exists $P-stun2 || docker run -d --name $P-stun2 --network $P-wan --ip 198.18.0.3 \
     -v /:/host:ro alpine chroot /host "$NODE_BIN" "$LAB/stun.mjs" 3478 >/dev/null
   if ! exists $P-turn; then
@@ -119,15 +121,18 @@ renumber() {
     conntrack -F >/dev/null 2>&1"
 }
 
-# server <ENV=value …>: (re)starts preprati. and the first STUN server.
+# server <ENV=value …>: (re)starts preprati. and the first STUN server. Shared files (relay
+# mode) are stored under test-results/nat-lab/shares, written as the invoking user.
 server() {
   docker exec $P-server sh -c "pkill -f dist/server/index.js; pkill -f stun.mjs" >/dev/null 2>&1
   sleep 0.3
   docker exec -d $P-server chroot /host "$NODE_BIN" "$LAB/stun.mjs" 3478
-  docker exec -d $P-server chroot /host /usr/bin/env NODE_ENV=production HOST=0.0.0.0 PORT=4400 \
+  docker exec -d $P-server chroot /host /usr/bin/setpriv --reuid="$(id -u)" --regid="$(id -g)" \
+    --clear-groups /usr/bin/env NODE_ENV=production HOST=0.0.0.0 PORT=4400 \
     SERVE_STATIC=true STATIC_DIR="$PROJECT/dist/client" LOG_LEVEL=warn RATE_LIMIT_API=100000 \
     SESSION_MAX_PER_IP=1000 RATE_LIMIT_JOIN_FAILURES=1000 RATE_LIMIT_WS_CONNECT=1000 \
-    WS_MAX_CONNECTIONS_PER_IP=1000 STUN_URLS=$STUN_URLS "$@" \
+    WS_MAX_CONNECTIONS_PER_IP=1000 STUN_URLS=$STUN_URLS STORAGE_DRIVER=local \
+    STORAGE_DIR=/tmp/shares "$@" \
     sh -c "cd '$PROJECT' && exec '$NODE_BIN' dist/server/index.js"
   for _ in $(seq 1 50); do
     docker exec $P-server wget -q -O /dev/null http://127.0.0.1:4400/api/health 2>/dev/null && return
@@ -136,7 +141,24 @@ server() {
   echo "The app did not start in the lab."; exit 1
 }
 
-# devices <tag> <payload MB> [retry]: starts both devices in the background.
+# same_network: device B joins A's network — one router, one public address — on a Wi-Fi
+# that keeps its devices apart ("client isolation"): nothing goes directly from one to the
+# other inside it, and the strict NAT doesn't loop traffic back in. separate_networks undoes it.
+same_network() {
+  docker network connect --ip 10.71.1.3 $P-lan-a $P-device-b 2>/dev/null
+  docker exec $P-device-b sh -c "ip route replace default via 10.71.1.254
+    ip route replace blackhole 10.71.1.2/32"
+  docker exec $P-device-a ip route replace blackhole 10.71.1.3/32
+}
+separate_networks() {
+  docker exec $P-device-a ip route del blackhole 10.71.1.3/32 2>/dev/null
+  docker exec $P-device-b sh -c "ip route del blackhole 10.71.1.2/32 2>/dev/null
+    ip route replace default via 10.71.2.254"
+  docker network disconnect $P-lan-a $P-device-b 2>/dev/null
+  true
+}
+
+# devices <tag> <payload MB> [retry|relay]: starts both devices in the background.
 devices() {
   local tag=$1
   rm -f "$RESULTS"/*-"$tag"* "$RESULTS"/code-"$tag"
@@ -154,7 +176,7 @@ wait_devices() { wait "$pid_a" "$pid_b" 2>/dev/null; }
 report() { "$NODE_BIN" "$LAB/report.mjs" "$RESULTS" "$1" ${ICE:+--ice}; }
 
 scenarios() {
-  local list=${*:-1 2 3 4 5 6 7}
+  local list=${*:-1 2 3 4 5 6 7 8 9}
   for s in $list; do
     echo
     case $s in
@@ -189,6 +211,12 @@ scenarios() {
     7) echo "7. Two home networks, WebSocket signaling (self-hosted Node server)"
        nat a home; nat b home; server
        devices s7 2; wait_devices; report s7 ;;
+    8) echo "8. One strict-NAT Wi-Fi that keeps its devices apart; B sends through preprati."
+       nat a strict; same_network; server "${HTTP_SIGNALING[@]}"
+       devices s8 3 relay; wait_devices; separate_networks; report s8 ;;
+    9) echo "9. A home network and a strict NAT, no TURN relay; B sends through preprati."
+       nat a home; nat b strict; server "${HTTP_SIGNALING[@]}"
+       devices s9 3 relay; wait_devices; report s9 ;;
     *) echo "Unknown scenario $s" ;;
     esac
   done

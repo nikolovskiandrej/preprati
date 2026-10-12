@@ -13,10 +13,12 @@ export type SignalingCloseReason = 'closed' | 'timeout' | 'error';
 
 /**
  * How eagerly a polling transport should check for messages:
- * `normal` while devices pair and negotiate, `standby` after a failed attempt
- * (a "Try again" may still come), `quiet` once the devices talk directly.
+ * `normal` while devices pair and negotiate, `live` while a relay-mode
+ * transfer reports its progress over signaling, `standby` after a failed
+ * attempt (a "Try again" may still come) or while relay mode is idle, and
+ * `quiet` once the devices talk directly.
  */
-export type SignalingPace = 'normal' | 'standby' | 'quiet';
+export type SignalingPace = 'normal' | 'live' | 'standby' | 'quiet';
 
 /** A signaling channel: WebSocket (default) or HTTP polling (serverless hosts). */
 export interface SignalingTransport {

@@ -4,12 +4,12 @@
 
 preprati. is a browser-based file transfer product with two clearly separated modes:
 
-|                         | **Quick Transfer**                                                                              | **Share Files**                                                                |
-| ----------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| For                     | Moving files between devices that are online right now                                          | Sending files to someone who opens them later                                  |
-| How                     | Live session via QR code, link or 6-character pairing code; files go over a WebRTC data channel | Files are encrypted in the browser, uploaded, and shared as a link + QR code   |
-| Server sees             | Device labels and WebRTC negotiation only. No file names or contents                            | Ciphertext and minimal metadata. No key, file names, types or individual sizes |
-| Sender must stay online | Yes                                                                                             | No — until expiry (default 24 h) or deletion                                   |
+|                         | **Quick Transfer**                                                                                                                                                                 | **Share Files**                                                                |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| For                     | Moving files between devices that are online right now                                                                                                                             | Sending files to someone who opens them later                                  |
+| How                     | Live session via QR code, link or 6-character pairing code; files go over a WebRTC data channel, or end-to-end encrypted through preprati. when the devices can't connect directly | Files are encrypted in the browser, uploaded, and shared as a link + QR code   |
+| Server sees             | Device labels and WebRTC negotiation only (in relay mode, also ciphertext). No file names or contents                                                                              | Ciphertext and minimal metadata. No key, file names, types or individual sizes |
+| Sender must stay online | Yes                                                                                                                                                                                | No — until expiry (default 24 h) or deletion                                   |
 
 Both modes have **Copy QR Code** (a real PNG on the clipboard, with an honest fallback to downloading the PNG), **Download QR Code**, **Copy Link** and native **Share**.
 
@@ -67,7 +67,7 @@ The repository also deploys to **Vercel** as a serverless profile of the same ap
 | `npm run check`        | lint + typecheck + test + build                                                        |
 | `npm run nat-check`    | Tells whether this computer's network allows direct connections across networks        |
 
-Optional cross-network tests: two NATed networks in Docker, the real app in real Chrome (Linux, Docker, Chrome; [details](docs/CONNECTIVITY.md#8-testing-across-networks)):
+Optional cross-network tests: NATed networks in Docker, the real app in real Chrome (Linux, Docker, Chrome; [details](docs/CONNECTIVITY.md#9-testing-across-networks)):
 
 ```bash
 npm run build && scripts/nat-lab/lab.sh up && scripts/nat-lab/lab.sh scenarios && scripts/nat-lab/lab.sh down
@@ -95,8 +95,8 @@ All settings are environment variables with defaults; **[.env.example](.env.exam
 | `SHARE_TTL`                                                                               | `24h`                                   | Share link lifetime                                                                                                 |
 | `SHARE_MAX_FILE_SIZE`, `SHARE_MAX_PACKAGE_SIZE`, `SHARE_MAX_FILES`, `SHARE_STORAGE_QUOTA` | `1GB`, `1GB`, `100`, `20GB`             | Limits shown to users before upload                                                                                 |
 | `SESSION_PAIRING_TTL`                                                                     | `10m`                                   | How long a pairing code / QR waits for a device                                                                     |
-| `STUN_URLS`                                                                               | Google + Cloudflare STUN (free)         | Direct connections across networks ([details](docs/CONNECTIVITY.md#5-free-stun-servers))                            |
-| `TURN_URLS` + `TURN_SECRET`                                                               | – (off)                                 | Optional relay for strict networks ([options and costs](docs/CONNECTIVITY.md#6-turn-relay-optional-off-by-default)) |
+| `STUN_URLS`                                                                               | Google + Cloudflare STUN (free)         | Direct connections across networks ([details](docs/CONNECTIVITY.md#6-free-stun-servers))                            |
+| `TURN_URLS` + `TURN_SECRET`                                                               | – (off)                                 | Optional relay for strict networks ([options and costs](docs/CONNECTIVITY.md#7-turn-relay-optional-off-by-default)) |
 | `NOTEA_URL`                                                                               | –                                       | Link for the "Made by Notea" attribution                                                                            |
 | `SIGNALING_TRANSPORT`, `KV_REST_API_URL` + `KV_REST_API_TOKEN`, `CRON_SECRET`             | `websocket`; `http` on Vercel           | Serverless profile: HTTP signaling, Redis state, cleanup cron                                                       |
 
@@ -107,14 +107,14 @@ Frontend-public build variables (`VITE_API_BASE_URL`, `VITE_SIGNALING_URL`) are 
 ## How it works
 
 - **Quick Transfer:** the signaling server (WebSocket, or HTTP polling on serverless hosts) pairs two browsers and relays offers, answers and ICE candidates. Two free STUN servers let devices on different networks connect directly. Files then move over a reliable WebRTC data channel using a small protocol: validated control messages, binary chunks with transfer tag, file index and sequence number, backpressure on `bufferedAmount`, receiver-acknowledged progress, and an explicit accept step. A device joining a _sending_ host by the short code must be allowed by the host first.
-- **Across networks:** when a direct connection isn't possible (e.g. a strict NAT on mobile data), the app explains why, offers **Try again** without a new code, and lets the sender **send the files as a link** instead. A connection that drops mid-transfer (Wi-Fi → mobile data) is repaired with an ICE restart. See **[docs/CONNECTIVITY.md](docs/CONNECTIVITY.md)**.
+- **Across networks:** when a direct connection isn't possible (a strict NAT on mobile data, a network that blocks UDP, or a Wi-Fi that keeps its devices apart), the app explains why, offers **Try again** without a new code, and lets the sender **Send through preprati.**: relay mode moves the files end-to-end encrypted through the temporary share storage, inside the same session. A connection that drops mid-transfer (Wi-Fi → mobile data) is repaired with an ICE restart, and phones keep their screen on while a session is live. See **[docs/CONNECTIVITY.md](docs/CONNECTIVITY.md)**.
 - **Share Files:** the browser generates a 256-bit key, derives AES-256-GCM keys with HKDF, encrypts an (padded) manifest of file names/types/sizes and every chunk of the concatenated files, uploads ciphertext, and builds `https://host/s/<id>#<key>`. The key stays in the URL fragment, which browsers never send to the server. Recipients decrypt and verify everything locally before a file is saved. Expiry is enforced on every read; a cleanup job deletes expired ciphertext.
 
 Details: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** · **[docs/CONNECTIVITY.md](docs/CONNECTIVITY.md)** · **[docs/PROTOCOL.md](docs/PROTOCOL.md)** · **[docs/SECURITY.md](docs/SECURITY.md)** · **[docs/BRAND.md](docs/BRAND.md)** · **[docs/ICONS.md](docs/ICONS.md)**
 
 ### Privacy in one paragraph
 
-Quick Transfer stores nothing on the server; if a TURN relay is configured, it may carry the (still encrypted) traffic on some networks, and the app tells you when that happens. Share Files stores only encrypted data, temporarily. **Anyone who has the complete share link can download the files until they expire or are deleted**, so share links only with people you trust.
+Quick Transfer stores nothing on the server, except in relay mode, which the sender chooses: then the files are stored encrypted until the receiver has them (and never longer than the share lifetime). If a TURN relay is configured, it may carry the (still encrypted) traffic on some networks. The app tells you which way the files travel. Share Files stores only encrypted data, temporarily. **Anyone who has the complete share link can download the files until they expire or are deleted**, so share links only with people you trust.
 
 ---
 
@@ -142,5 +142,5 @@ Current Chrome, Edge, Firefox and Safari (desktop and mobile). Quick Transfer ne
 - Received/downloaded files are assembled as browser Blobs before saving, so the receiving browser's memory and disk bound very large files.
 - On a long-lived server, signaling state and rate limits are in memory: one instance (or sticky sessions) per deployment. The serverless profile keeps this state in Redis instead.
 - On Vercel's Hobby plan, share sizes are capped lower (100 MB in the setup above), Blob operations are budgeted, and the cleanup cron runs daily. Expiry is still enforced on every request.
-- Without a TURN relay (off by default, because relays cost bandwidth), some network combinations cannot connect directly, most often a strict NAT on mobile data. The app explains why, and the sender can switch to a share link. See [docs/CONNECTIVITY.md](docs/CONNECTIVITY.md).
+- Without a TURN relay (off by default, because relays cost bandwidth), some network combinations cannot connect directly, most often a strict NAT on mobile data, or a Wi-Fi that keeps its devices apart. The app explains why, and the sender can send through preprati. instead (relay mode, within the Share Files size limits and storage budget). See [docs/CONNECTIVITY.md](docs/CONNECTIVITY.md).
 - Cross-network behaviour can't be tested with `npm run dev`/`dev:lan` (they serve only your network); use the deployed app with real devices, or the Docker NAT lab (`scripts/nat-lab/lab.sh`).

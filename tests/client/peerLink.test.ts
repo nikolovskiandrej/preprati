@@ -5,14 +5,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { classifyFailure, type ConnectionDiagnostics } from '../../src/client/transfer/diagnostics';
 import { PeerLink, type PeerFailure } from '../../src/client/transfer/peerLink';
-import type { SignalPayload } from '../../src/shared/signaling';
+import type { NegotiationPayload } from '../../src/shared/signaling';
 import { FakeNetwork, type FakePeerConnection } from '../helpers/fakeWebRtc';
 
 const ICE = [{ urls: ['stun:stun.example.test:3478', 'stun:stun2.example.test:3478'] }];
 
 interface Side {
   link: PeerLink;
-  sent: SignalPayload[];
+  sent: NegotiationPayload[];
   opened: number;
   failed: Array<{ reason: PeerFailure; diagnostics: ConnectionDiagnostics }>;
   lost: number;
@@ -33,7 +33,10 @@ describe('PeerLink', () => {
 
   /** Two links whose signals reach each other asynchronously (optionally reordered by `deliver`). */
   function pair(
-    options: { attempt?: number; deliver?: (to: Side, payloads: SignalPayload[]) => void } = {},
+    options: {
+      attempt?: number;
+      deliver?: (to: Side, payloads: NegotiationPayload[]) => void;
+    } = {},
   ) {
     const make = (isOfferer: boolean): Side => {
       const side = {
@@ -94,7 +97,7 @@ describe('PeerLink', () => {
   });
 
   it('queues candidates that arrive before the offer', async () => {
-    const held: SignalPayload[] = [];
+    const held: NegotiationPayload[] = [];
     const { offerer, answerer, pcs } = pair({
       deliver: (to, payloads) => {
         if (to === answerer && payloads[0]!.kind === 'description') {
@@ -169,13 +172,35 @@ describe('PeerLink', () => {
     expect(offerer.link.diagnostics().restarts).toBe(1);
   });
 
+  it('repairs a dropped path right away when the page is back in the foreground', async () => {
+    const { offerer, answerer, pcs } = pair();
+    await Promise.all([offerer.link.start(), answerer.link.start()]);
+    await vi.advanceTimersByTimeAsync(100);
+    const restarts = () => pcs[0]!.offers.filter((options) => options?.iceRestart).length;
+
+    network.dropLinks();
+    await vi.advanceTimersByTimeAsync(20_000); // a locked phone: both restarts come to nothing
+    expect(restarts()).toBe(2);
+    network.restoreLinks();
+    offerer.link.resume();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(restarts()).toBe(3);
+    expect([offerer.reconnecting.at(-1), answerer.reconnecting.at(-1)]).toEqual([false, false]);
+    expect([offerer.lost, answerer.lost]).toEqual([0, 0]);
+    // Nothing to repair: resuming a healthy link does nothing.
+    offerer.link.resume();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(restarts()).toBe(3);
+  });
+
   it('gives up when the path does not come back in time', async () => {
     const { offerer, answerer, pcs } = pair();
     await Promise.all([offerer.link.start(), answerer.link.start()]);
     await vi.advanceTimersByTimeAsync(100);
 
     network.dropLinks();
-    await vi.advanceTimersByTimeAsync(24_000);
+    // Long enough for a phone that locked its screen for a moment to come back.
+    await vi.advanceTimersByTimeAsync(44_000);
     expect([offerer.lost, answerer.lost]).toEqual([0, 0]);
     await vi.advanceTimersByTimeAsync(2_000);
     expect([offerer.lost, answerer.lost]).toEqual([1, 1]);

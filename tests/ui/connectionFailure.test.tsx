@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 /**
  * What people see when two devices can't connect: a cause-specific
- * explanation, the actions that apply, technical details on request, and
- * the hand-off of the selected files to Share Files.
+ * explanation, the actions that apply (relay mode first, where it works),
+ * technical details on request, and the hand-off of the selected files to
+ * Share Files.
  */
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { describeQuickError } from '../../src/client/features/quick/errors';
-import { QuickError } from '../../src/client/features/quick/panels';
+import { QuickError, RelayNote } from '../../src/client/features/quick/panels';
 import { handOffFiles, handedOffFiles } from '../../src/client/lib/handoff';
 import ShareScreen from '../../src/client/screens/ShareScreen';
 import type { ConnectionDiagnostics, FailureCause } from '../../src/client/transfer/diagnostics';
@@ -27,6 +28,7 @@ const diagnostics: ConnectionDiagnostics = {
   ],
   durationMs: 15_600,
   restarts: 0,
+  sameNetwork: false,
 };
 
 function failedState(cause: FailureCause, overrides: Partial<QuickState> = {}): QuickState {
@@ -45,6 +47,8 @@ function failedState(cause: FailureCause, overrides: Partial<QuickState> = {}): 
     error: 'connection-failed',
     failure: { cause, diagnostics },
     canRetry: true,
+    relay: null,
+    canRelay: false,
     ...overrides,
   };
 }
@@ -55,10 +59,11 @@ describe('a failed connection', () => {
     ['local-network', /This device’s network blocks direct connections/],
     ['remote-network', /The other device’s network blocks direct connections/],
     ['no-remote-details', /didn’t answer in time/],
-    ['same-network-only', /only connects devices on the same network/],
+    ['same-network-only', /connects devices directly only when they’re on the same network/],
+    ['same-network-blocked', /Both devices are on the same network, but it doesn’t let them/],
   ] as const)('explains %s in plain language', (cause, message) => {
     const view = describeQuickError(failedState(cause))!;
-    renderWithProviders(<QuickError view={view} actions={null} />);
+    renderWithProviders(<QuickError view={view} device="Android · Chrome" actions={null} />);
     expect(screen.getByText('Couldn’t connect the devices')).toBeInTheDocument();
     expect(screen.getByText(message)).toBeInTheDocument();
   });
@@ -68,7 +73,7 @@ describe('a failed connection', () => {
       shareAvailable: true,
     })!;
     expect(sender.hint).toBe('errors.connectionLinkSender');
-    expect(sender.connection).toEqual({ canRetry: true, diagnostics });
+    expect(sender.connection).toEqual({ canRetry: true, canRelay: false, diagnostics });
     const receiver = describeQuickError(
       failedState('incompatible-networks', { role: 'receiver' }),
       {
@@ -79,10 +84,50 @@ describe('a failed connection', () => {
     expect(describeQuickError(failedState('incompatible-networks'))!.hint).toBeUndefined();
   });
 
+  const relay = {
+    limits: { maxFiles: 100, maxFileBytes: 100_000_000, maxPackageBytes: 100_000_000 },
+    ttlSeconds: 86_400,
+  };
+
+  it('offers relay mode to the sender, and tells the receiver where to choose it', () => {
+    const sender = describeQuickError(
+      failedState('same-network-blocked', { relay, canRelay: true }),
+      { shareAvailable: true },
+    )!;
+    expect(sender.connection).toMatchObject({ canRetry: true, canRelay: true });
+    expect(sender.hint).toBeUndefined(); // the button says it
+
+    const receiver = describeQuickError(
+      failedState('same-network-blocked', { role: 'receiver', isHost: false, relay }),
+      { shareAvailable: true },
+    )!;
+    expect(receiver.hint).toBe('errors.connectionRelayReceiver');
+    renderWithProviders(<QuickError view={receiver} device="Android · Chrome" actions={null} />);
+    expect(
+      screen.getByText(/Or, on Android · Chrome, choose “Send through preprati.”/),
+    ).toBeInTheDocument();
+  });
+
+  it('explains what relay mode does with the files, and its size limit', () => {
+    const files = [new File(['x'.repeat(10)], 'a.txt')];
+    const { unmount } = renderWithProviders(
+      <RelayNote device="Android · Chrome" relay={relay} files={files} />,
+    );
+    expect(
+      screen.getByText(
+        /keeps them only until Android · Chrome has them, and never longer than 24 hours/,
+      ),
+    ).toBeInTheDocument();
+    unmount();
+    const tooLarge = { ...relay, limits: { ...relay.limits, maxPackageBytes: 5, maxFileBytes: 5 } };
+    renderWithProviders(<RelayNote device="Android · Chrome" relay={tooLarge} files={files} />);
+    expect(screen.getByText(/Up to 5 B can go through preprati. at once/)).toBeInTheDocument();
+  });
+
   it('shows what each side found on request, without addresses', async () => {
     const user = userEvent.setup();
     const view = describeQuickError(failedState('incompatible-networks'))!;
-    renderWithProviders(<QuickError view={view} actions={null} />);
+    renderWithProviders(<QuickError view={view} device="Android · Chrome" actions={null} />);
     const toggle = screen.getByText('Connection details');
     expect(screen.getByText('Public address found (strict NAT)')).not.toBeVisible();
     await user.click(toggle);
@@ -93,12 +138,17 @@ describe('a failed connection', () => {
     expect(screen.getByText('Relay server').nextSibling).toHaveTextContent(
       'Not set up on this server',
     );
+    expect(screen.getByText('Network').nextSibling).toHaveTextContent(
+      'Different from the other device',
+    );
     expect(screen.getByText('Attempt 1, stopped after 16 s')).toBeVisible();
   });
 
   it('is described in Macedonian too', () => {
     const view = describeQuickError(failedState('local-network'))!;
-    renderWithProviders(<QuickError view={view} actions={null} />, { locale: 'mk' });
+    renderWithProviders(<QuickError view={view} device="Android · Chrome" actions={null} />, {
+      locale: 'mk',
+    });
     expect(screen.getByText('Уредите не можеа да се поврзат')).toBeInTheDocument();
     expect(screen.getByText(/Мрежата на овој уред блокира/)).toBeInTheDocument();
     expect(screen.getByText('Детали за врската')).toBeInTheDocument();

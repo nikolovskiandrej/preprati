@@ -1,10 +1,11 @@
 # Protocols
 
-preprati. uses three protocols:
+preprati. uses four protocols:
 
 1. **Signaling** (WebSocket or HTTP polling, JSON) — helps two browsers find each other.
 2. **Transfer** (WebRTC data channel) — carries file names and file bytes for Quick Transfer.
-3. **Share package** (HTTPS + client-side encryption) — stores encrypted packages for Share Files.
+3. **Relay mode** (end-to-end encrypted messages over signaling + share packages) — Quick Transfer when the devices can't connect directly.
+4. **Share package** (HTTPS + client-side encryption) — stores encrypted packages for Share Files and relay mode.
 
 All message schemas live in `src/shared/` and `src/client/transfer/protocol.ts` and are validated on receipt.
 
@@ -16,14 +17,14 @@ JSON text frames only (binary frames are rejected). Max message size `WS_MAX_MES
 
 ### Client → server
 
-| Message                                                                                   | Purpose                                                                                                                                                                                                                                          |
-| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `{type:"create-session", role:"sender"\|"receiver", device:{label}}`                      | Host creates a session.                                                                                                                                                                                                                          |
-| `{type:"join-session", target:{via:"link",sessionId}\|{via:"code",code}, device:{label}}` | Guest joins with the QR/link capability or the 6-character code.                                                                                                                                                                                 |
-| `{type:"approve-peer"}` / `{type:"decline-peer"}`                                         | Host decides about a device that joined **by code** while the host is **sending**.                                                                                                                                                               |
-| `{type:"signal", payload}`                                                                | Relayed to the other member once paired. `payload` is `{kind:"description",description:{type,sdp},attempt?}`, `{kind:"candidate",candidate,attempt?}` or `{kind:"retry",attempt}` (see [Connection attempts](#connection-attempts-and-repairs)). |
-| `{type:"leave-session"}`                                                                  | Leave explicitly (closing the socket does the same).                                                                                                                                                                                             |
-| `{type:"ping"}`                                                                           | Liveness; answered with `pong`.                                                                                                                                                                                                                  |
+| Message                                                                                   | Purpose                                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{type:"create-session", role:"sender"\|"receiver", device:{label}}`                      | Host creates a session.                                                                                                                                                                                                                                                                                                                                                     |
+| `{type:"join-session", target:{via:"link",sessionId}\|{via:"code",code}, device:{label}}` | Guest joins with the QR/link capability or the 6-character code.                                                                                                                                                                                                                                                                                                            |
+| `{type:"approve-peer"}` / `{type:"decline-peer"}`                                         | Host decides about a device that joined **by code** while the host is **sending**.                                                                                                                                                                                                                                                                                          |
+| `{type:"signal", payload}`                                                                | Relayed to the other member once paired. `payload` is `{kind:"description",description:{type,sdp},attempt?}`, `{kind:"candidate",candidate,attempt?}` or `{kind:"retry",attempt}` (see [Connection attempts](#connection-attempts-and-repairs)), or relay mode's `{kind:"relay-hello",key,reply?}` and `{kind:"relay-message",seq,data}` (see [Relay mode](#3-relay-mode)). |
+| `{type:"leave-session"}`                                                                  | Leave explicitly (closing the socket does the same).                                                                                                                                                                                                                                                                                                                        |
+| `{type:"ping"}`                                                                           | Liveness; answered with `pong`.                                                                                                                                                                                                                                                                                                                                             |
 
 ### Server → client
 
@@ -71,8 +72,8 @@ The **host** always creates the WebRTC offer; the guest answers. Remote ICE cand
 ### Connection attempts and repairs
 
 - **Attempts.** Every description and candidate carries `attempt` (absent = 0). After a failed attempt, **Try again** starts attempt n+1 over the same session, with a fresh `RTCPeerConnection` on both sides and no new code. The host starts it directly; a guest sends `{kind:"retry",attempt:n+1}` and the host answers with a new offer. Signals from an older attempt are dropped, and candidates that overtake their offer wait for it. At most `MAX_CONNECTION_ATTEMPTS` (6) attempts per session.
-- **Failure.** An attempt fails when ICE fails or nothing opens within 30 s. Both devices then classify the failure from the candidates each side gathered (no STUN configured · nothing from the other device · no public address here · none there · both public but incompatible, e.g. a strict NAT) and explain it.
-- **Repairs.** Once the data channel has opened, ICE `disconnected` (for 2.5 s) or `failed` makes the host send an ICE-restart offer (`iceRestart: true`) on the same connection; the guest answers it. The DTLS/SCTP association and the data channel stay open, so a transfer continues after a network change. At most two restarts per drop, within 25 s; after that the connection counts as lost.
+- **Failure.** An attempt fails when ICE fails or nothing opens within 30 s. Both devices then classify the failure from the candidates each side gathered (no STUN configured · nothing from the other device · both on one network, i.e. the same public address · no public address here · none there · both public but incompatible, e.g. a strict NAT) and explain it.
+- **Repairs.** Once the data channel has opened, ICE `disconnected` (for 2.5 s) or `failed` makes the host send an ICE-restart offer (`iceRestart: true`) on the same connection; the guest answers it. The DTLS/SCTP association and the data channel stay open, so a transfer continues after a network change. At most two restarts per drop, within 45 s; after that the connection counts as lost. A page that returns to the foreground repairs a dropped path at once (one more restart is allowed).
 - **Signaling after connecting.** A working direct connection doesn't need signaling. `peer-left` with reason `gone` only closes signaling; the data channel reports a real departure (`bye`, channel close, ICE failing for good). `peer-left` with reason `left` ends the session right away.
 
 ---
@@ -134,7 +135,36 @@ sender                                receiver
 
 ---
 
-## 3. Share package format, version 1
+## 3. Relay mode
+
+When the devices can't connect directly, the sending device can switch the session to relay mode ("Send through preprati."). Files then travel as a share package (§4) instead of over a data channel; the session, pairing and interface stay the same. Code: `src/client/transfer/relay.ts`, `relayCrypto.ts`, `relayStorage.ts`.
+
+### Key agreement (signaling payloads)
+
+1. The sender creates an ephemeral ECDH P-256 key pair and sends `{kind:"relay-hello", key}` (`key`: the raw 65-byte public key, base64url, 87 characters).
+2. The receiver creates its own pair and answers `{kind:"relay-hello", key, reply}`, `reply` being the sender key it answers. A sender only completes the proposal it made (also when the answer arrives after its 20 s wait); a receiver accepts a new proposal at any time unless a transfer is running.
+3. Both derive the message key: `HKDF-SHA-256(ECDH secret, salt = "preprati.relay.v1", info = "<session id>|<sender key>|<receiver key>")` → AES-256-GCM.
+
+### Control messages
+
+Each control message is JSON, sealed with the message key and sent as `{kind:"relay-message", seq, data}`: `data` is base64url(IV (12) ‖ ciphertext ‖ tag (16)), at most 48,000 characters; `seq` numbers the sender's messages from 0. The additional authenticated data is `preprati/relay/v1/<sender|receiver>/<seq>`, so a message can't be replayed under another number, reflected to the device that sent it, or altered. Receivers handle messages strictly in order: a repeated number is ignored, a gap (a message that went missing) stops the active transfer.
+
+| Message                                                                    | From     | Meaning                                                                                                                                                           |
+| -------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{t:"offer", id, files:[{index,name,size,type,lastModified}], totalBytes}` | sender   | Same file list as the data-channel offer. Names are shortened (keeping extensions) only if the list wouldn't fit one message; the package carries the full names. |
+| `{t:"accept", id}` / `{t:"reject", id}`                                    | receiver | Decision.                                                                                                                                                         |
+| `{t:"progress", id, stage:"upload"\|"download", bytes}`                    | either   | The sender's upload (to the receiver), the receiver's download (to the sender); at most every 1.5 s.                                                              |
+| `{t:"ready", id, share, secret}`                                           | sender   | The package is stored: its id and its 256-bit key (base64url), which never travel unencrypted.                                                                    |
+| `{t:"complete", id}`                                                       | receiver | Every file was downloaded, authenticated and handed over; the sender deletes the package.                                                                         |
+| `{t:"cancel", id, reason:"user"\|"error"}`                                 | either   | Stops the transfer; the sender deletes whatever was stored.                                                                                                       |
+
+### Flow
+
+`offer → accept → (sender uploads the package; progress…) → ready → (receiver downloads and verifies it; progress…) → complete → sender deletes the package`. The receiver checks that the package holds exactly the offered files (count and sizes); anything else fails the transfer as a protocol error. Leaving the session ends relay mode (the other device sees `peer-left`). A package whose deletion never happens expires with the share lifetime.
+
+---
+
+## 4. Share package format, version 1
 
 ### Keys
 
@@ -176,7 +206,7 @@ Sealed with the manifest key and AAD `"preprati/v1/manifest"`, after padding the
 
 ---
 
-## 4. HTTP API
+## 5. HTTP API
 
 All responses are JSON unless noted, with `Cache-Control: no-store`. Errors: `{ "error": { "code", "message", "retryAfterSeconds?" } }`.
 

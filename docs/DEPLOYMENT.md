@@ -88,7 +88,7 @@ Recommendations:
 
 ## TURN (optional)
 
-Without TURN, devices on restrictive networks (symmetric NAT, some mobile carriers, corporate firewalls) cannot connect directly. The app explains why, offers "Try again" and lets the sender switch to a share link. A relay is off by default because it costs bandwidth; [CONNECTIVITY.md §6](CONNECTIVITY.md#6-turn-relay-optional-off-by-default) compares the options, including coturn on hardware you already own. With [coturn](https://github.com/coturn/coturn):
+Without TURN, devices on restrictive networks (symmetric NAT, some mobile carriers, corporate firewalls, Wi-Fi networks that keep devices apart) cannot connect directly. The app explains why, offers "Try again" and lets the sender **Send through preprati.**: relay mode moves the files end-to-end encrypted through the share storage, so it needs Share Files to be enabled (any storage driver) and inherits its size limits and budget ([CONNECTIVITY.md §5](CONNECTIVITY.md#5-relay-mode-send-through-preprati)). A TURN relay is off by default because it costs bandwidth; [CONNECTIVITY.md §7](CONNECTIVITY.md#7-turn-relay-optional-off-by-default) compares the options, including coturn on hardware you already own. With [coturn](https://github.com/coturn/coturn):
 
 ```ini
 # /etc/turnserver.conf
@@ -166,8 +166,8 @@ Files still move directly between the two devices over WebRTC; only the small si
 - **Request bodies** are limited to 4.5 MB per function call ([limits](https://vercel.com/docs/functions/limitations)), so `SHARE_CHUNK_SIZE` must stay below that. 4 MB chunks keep a margin.
 - **Blob operations are metered** ([usage and pricing](https://vercel.com/docs/vercel-blob/usage-and-pricing)). On the Hobby plan, going over the included amount blocks the store for a while, so `BLOB_MONTHLY_WRITE_BUDGET` stops _new_ shares before the allowance runs out (the interface then reports storage as full). Each package costs one write per chunk plus two (manifest and the completeness check at finalize). Deleting is free. Each chunk download is one read.
 - **Cron jobs** run at most once a day on Hobby ([cron usage](https://vercel.com/docs/cron-jobs/usage-and-pricing)). Expiry itself is exact: the API refuses expired packages and deletes their data as soon as anyone asks for them, and any API traffic triggers a sweep of due packages from a Redis index (no storage listing). A package nobody touches after expiry, while the site has no traffic at all, is deleted by the next daily run. Until then it stays encrypted in the private store and unreachable through the API.
-- **Polling costs requests.** Every poll is a function invocation plus about 4 Redis commands: roughly 600 commands for a 10-minute session, against 500K a month on Upstash's free plan ([estimate](CONNECTIVITY.md#7-what-signaling-costs-on-the-free-plans)).
-- **No TURN relay is included.** Set `TURN_URLS` with `TURN_SECRET` (or `TURN_USERNAME`/`TURN_CREDENTIAL`) for networks where devices can't connect directly; read [CONNECTIVITY.md §6](CONNECTIVITY.md#6-turn-relay-optional-off-by-default) first.
+- **Polling costs requests.** Every poll is a function invocation plus about 4 Redis commands: roughly 600 commands for a 10-minute session, against 500K a month on Upstash's free plan ([estimate](CONNECTIVITY.md#8-what-signaling-costs-on-the-free-plans)).
+- **No TURN relay is included.** Set `TURN_URLS` with `TURN_SECRET` (or `TURN_USERNAME`/`TURN_CREDENTIAL`) for networks where devices can't connect directly; read [CONNECTIVITY.md §7](CONNECTIVITY.md#7-turn-relay-optional-off-by-default) first. Without one, relay mode covers those networks within the share limits.
 
 ## Local network testing (phones)
 
@@ -177,7 +177,7 @@ npm run dev:lan          # https://<your-LAN-IP>:5173 with a self-signed certifi
 
 Open the address on the phone and accept the certificate warning once (Web Crypto and clipboard need a secure context). Both devices must reach your computer; WebRTC then connects directly on the LAN.
 
-This tests one network only: devices elsewhere can't reach a signaling server on your computer. To test **across networks** (laptop on Wi-Fi, phone on mobile data), use a public deployment, or the Docker NAT lab. See [CONNECTIVITY.md §8](CONNECTIVITY.md#8-testing-across-networks).
+This tests one network only: devices elsewhere can't reach a signaling server on your computer. To test **across networks** (laptop on Wi-Fi, phone on mobile data), use a public deployment, or the Docker NAT lab. See [CONNECTIVITY.md §9](CONNECTIVITY.md#9-testing-across-networks).
 
 ## Checklist
 

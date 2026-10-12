@@ -216,6 +216,30 @@ describe('HttpSignalingClient pacing', () => {
     client.close();
   });
 
+  it('polls steadily during a relay transfer, and at once when the page returns', async () => {
+    vi.useFakeTimers();
+    const { polls } = fakeServer();
+    const client = new HttpSignalingClient('http://signal.test');
+    await client.connect();
+    client.setPace('live');
+    client.send({ type: 'ping' }); // activity would normally mean 400 ms polling
+    await vi.advanceTimersByTimeAsync(2_000);
+    const start = polls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(polls.length - start).toBeGreaterThanOrEqual(9); // about once per second…
+    expect(polls.length - start).toBeLessThanOrEqual(11); // …not every 400 ms
+
+    client.setPace('quiet');
+    await vi.advanceTimersByTimeAsync(2_000);
+    const hidden = polls.length;
+    // A phone brings the page back after timers were paused in the background.
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(polls.length).toBe(hidden + 1);
+    client.close();
+  });
+
   it('acknowledges what it handled and skips messages it already has', async () => {
     vi.useFakeTimers();
     const left = { type: 'peer-left' };

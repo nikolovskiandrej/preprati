@@ -126,12 +126,17 @@ export const en = {
     awaitingApproval: 'Waiting for {device} to allow this device…',
     connecting: 'Connecting to {device}…',
     connectingHint: 'Setting up a direct, encrypted connection.',
+    connectingServer: 'Connecting to {device} through preprati.…',
+    connectingServerHint: 'Agreeing on a key that only the two devices know.',
     connectedTo: 'Connected to {device}',
     routeDirect: 'Direct connection',
     routeRelay: 'Relayed connection',
     routeDirectHint: 'Files travel straight between the two devices, encrypted.',
     routeRelayHint:
       'Files travel through an encrypted relay because a direct path wasn’t possible.',
+    routeServer: 'Through preprati.',
+    routeServerHint:
+      'Files are encrypted on the sending device and pass through preprati. only for this transfer.',
     waitingForFiles: 'Waiting for files from {device}…',
     chooseToSend: 'Choose the files to send to {device}.',
     sendNow: 'Send {count, plural, one {# file} other {# files}}',
@@ -144,6 +149,10 @@ export const en = {
     transferring: 'Transferring',
     sending: 'Sending to {device}',
     receiving: 'Receiving from {device}',
+    relayUploading: 'Encrypting and uploading for {device}',
+    relayPeerDownloading: '{device} is downloading the files',
+    relayPeerUploading: '{device} is uploading the files',
+    relayDownloading: 'Downloading from {device}',
     progress: '{done} of {total}',
     speed: '{speed} · {eta} left',
     cancelTransfer: 'Cancel transfer',
@@ -176,6 +185,12 @@ export const en = {
     reconnectingHint: 'Files keep moving as soon as the devices find each other again.',
     tryAgain: 'Try again',
     sendAsLink: 'Send as a link instead',
+    relaySend: 'Send through preprati.',
+    relaySendInstead: 'Send through preprati. instead',
+    relayNote:
+      'The files are encrypted on this device first. preprati. keeps them only until {device} has them, and never longer than {time}.',
+    relayTooLarge:
+      'Up to {size} can go through preprati. at once. Choose fewer or smaller files to use it.',
     details: {
       title: 'Connection details',
       thisDevice: 'This device',
@@ -187,6 +202,10 @@ export const en = {
       nothingReceived: 'Nothing received',
       relayNone: 'Not set up on this server',
       relayAvailable: 'Set up',
+      network: 'Network',
+      networkSame: 'Same as the other device',
+      networkDifferent: 'Different from the other device',
+      networkUnknown: 'Unknown',
       attempt: 'Attempt {number}, stopped after {seconds} s',
     },
   },
@@ -284,7 +303,7 @@ export const en = {
       'The devices couldn’t connect directly. This can happen on strict networks (some offices, schools or mobile carriers).',
     connectionFailedRelay: 'Try both devices on the same Wi-Fi.',
     connectionSameNetwork:
-      'This server only connects devices on the same network, so both devices need to be on the same Wi-Fi.',
+      'This server connects devices directly only when they’re on the same network, such as the same Wi-Fi.',
     connectionLocalNetwork:
       'This device’s network blocks direct connections, as many office, school and public Wi-Fi networks do. Try another network, such as mobile data, or put both devices on the same Wi-Fi.',
     connectionRemoteNetwork:
@@ -293,10 +312,22 @@ export const en = {
       'The other device didn’t answer in time. Check that its page is still open, then try again.',
     connectionIncompatible:
       'Both devices are online, but their networks don’t allow a direct connection between them. This often happens when one of them uses mobile data. Try both devices on the same Wi-Fi.',
+    connectionSameNetworkBlocked:
+      'Both devices are on the same network, but it doesn’t let them connect to each other directly. Some routers keep devices apart — guest networks usually do — and so does a VPN on either device.',
+    connectionRelayReceiver:
+      'Or, on {device}, choose “Send through preprati.” — it works on any network.',
     connectionLinkSender: 'Or send the files as a link, which works on any network.',
     connectionLinkReceiver:
       'Or ask the sender to share the files as a link, which works on any network.',
     connectionLost: 'The connection was lost. Files that weren’t complete were discarded.',
+    relayUnanswered:
+      'The other device didn’t answer. Check that its preprati. page is still open, then try again.',
+    relayTooLarge:
+      'These files are too large to send through preprati. Choose fewer or smaller files, then send again.',
+    relayStorage:
+      'preprati. can’t store files right now, so nothing was sent. Try again later, or try connecting the devices directly again.',
+    relayNetwork:
+      'The transfer through preprati. was interrupted. Check the internet connection, then send again.',
     protocolError: 'The transfer stopped because the data didn’t match what was announced.',
     fileReadFailed: 'A file couldn’t be read. It may have been moved or changed — choose it again.',
     versionMismatch:

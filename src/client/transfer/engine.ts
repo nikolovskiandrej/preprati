@@ -52,7 +52,16 @@ export type TransferStatus =
   | 'cancelled'
   | 'failed';
 export type TransferErrorCode =
-  'connection-lost' | 'protocol-error' | 'file-read-failed' | 'peer-error';
+  | 'connection-lost'
+  | 'protocol-error'
+  | 'file-read-failed'
+  | 'peer-error'
+  /** Relay mode: the selection is over the storage limits. */
+  | 'relay-too-large'
+  /** Relay mode: the server can't store files right now (full, busy, monthly budget used). */
+  | 'relay-storage'
+  /** Relay mode: the upload or download was interrupted. */
+  | 'relay-network';
 
 export interface TransferFileSnapshot {
   index: number;
@@ -75,6 +84,11 @@ export interface TransferSnapshot {
   finishedAt: number | null;
   endedBy: 'local' | 'remote' | null;
   error: TransferErrorCode | null;
+  /**
+   * Relay mode only: what `transferredBytes` currently counts — the sender
+   * uploading the encrypted package, or the receiver downloading it.
+   */
+  stage?: 'upload' | 'download';
 }
 
 export interface ReceivedFile {
@@ -94,6 +108,24 @@ export type EngineEvent =
   | { type: 'file-received'; file: ReceivedFile }
   | { type: 'peer-bye' }
   | { type: 'channel-closed' };
+
+/**
+ * What a Quick Transfer session needs from the thing that moves its files:
+ * TransferEngine over a direct connection, RelayEngine through temporary
+ * encrypted storage when there is none.
+ */
+export interface FileTransport {
+  readonly ready: boolean;
+  readonly busy: boolean;
+  /** Call once the path is up; `ready` is emitted when both sides can transfer. */
+  start(): void;
+  offer(files: File[]): TransferSnapshot;
+  accept(id: string): void;
+  reject(id: string): void;
+  cancel(): void;
+  sayGoodbye(): void;
+  dispose(): void;
+}
 
 export interface EngineOptions {
   onEvent: (event: EngineEvent) => void;
@@ -132,7 +164,7 @@ interface Incoming {
   lastAckBytes: number;
 }
 
-export class TransferEngine {
+export class TransferEngine implements FileTransport {
   private readonly channel: ChannelLike;
   private readonly options: EngineOptions;
   private readonly now: () => number;

@@ -12,6 +12,7 @@ import {
   formatDuration,
   formatTtl,
 } from '../../src/client/lib/format';
+import { HttpError, withRetry } from '../../src/client/lib/http';
 import { RateMeter } from '../../src/client/lib/rateMeter';
 import {
   decodeChunk,
@@ -169,5 +170,25 @@ describe('rate meter', () => {
     const estimate = meter.push(2000, 10_000);
     expect(estimate.bytesPerSecond).toBeCloseTo(1000);
     expect(estimate.etaSeconds).toBeCloseTo(8);
+  });
+});
+
+describe('retries', () => {
+  it('retries passing problems, but not a server that asks to come back much later', async () => {
+    let calls = 0;
+    const flaky = () =>
+      ++calls < 3 ? Promise.reject(new HttpError('network', 0, 'offline')) : Promise.resolve('ok');
+    expect(await withRetry(flaky, { baseDelayMs: 1 })).toBe('ok');
+    expect(calls).toBe(3);
+
+    calls = 0;
+    const full = () => {
+      calls++;
+      return Promise.reject(new HttpError('quota-exceeded', 507, 'full', 900));
+    };
+    await expect(withRetry(full, { baseDelayMs: 1 })).rejects.toMatchObject({
+      code: 'quota-exceeded',
+    });
+    expect(calls).toBe(1); // no 15-second wait for an answer that won't change
   });
 });

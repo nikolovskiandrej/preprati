@@ -2,11 +2,13 @@
 // receiving host or the sending guest, and records what happened and what the
 // app told the user. Runs inside a lab container's network namespace (see lab.sh).
 //
-//   node client.mjs <host|guest> <app url> <tag> [timeout s] [payload MB] [retry]
+//   node client.mjs <host|guest> <app url> <tag> [timeout s] [payload MB] [retry|relay]
 //
 // With "retry": after a failed connection, wait for <dir>/go-retry-<tag>, then
-// the guest presses "Try again". Files are exchanged through <dir> (LAB_DIR,
-// default /tmp: the lab's shared results directory inside the container).
+// the guest presses "Try again". With "relay": after a failed connection, the
+// guest sends the file through preprati. instead and the host accepts it.
+// Files are exchanged through <dir> (LAB_DIR, default /tmp: the lab's shared
+// results directory inside the container).
 /* global window -- the init script and evaluate callbacks run in the page */
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -121,38 +123,58 @@ async function connect() {
   return outcome;
 }
 
+async function receive(route) {
+  await page.getByRole('button', { name: 'Accept' }).click({ timeout: 60_000 });
+  await page.getByText(/1 file received from/).waitFor({ timeout: 180_000 });
+  const download = page.waitForEvent('download');
+  await page
+    .getByRole('button', { name: /^Save: / })
+    .first()
+    .click();
+  const bytes = readFileSync(await (await download).path());
+  result.receivedSha256 = createHash('sha256').update(bytes).digest('hex');
+  mark('file received');
+  return `received the file ${route}`;
+}
+
+function payload() {
+  const file = `${dir}/payload-${tag}.bin`;
+  const data = randomBytes(Math.round(Number(payloadMb) * 1_000_000));
+  writeFileSync(file, data);
+  result.sentSha256 = createHash('sha256').update(data).digest('hex');
+  return file;
+}
+
 try {
   const codeFile = `${dir}/code-${tag}`;
+  const relay = mode === 'relay';
   if (role === 'host') {
     await page.goto(`${base}/receive`);
     const code = page.getByTestId('pairing-code');
     await code.waitFor({ timeout: 20_000 });
     writeFileSync(codeFile, (await code.textContent()).replace('-', '').trim());
     result.outcome = await connect();
-    if (result.outcome.startsWith('connected')) {
-      const route = result.outcome;
-      await page.getByRole('button', { name: 'Accept' }).click({ timeout: 30_000 });
-      await page.getByText(/1 file received from/).waitFor({ timeout: 180_000 });
-      const download = page.waitForEvent('download');
-      await page
-        .getByRole('button', { name: /^Save: / })
-        .first()
-        .click();
-      const bytes = readFileSync(await (await download).path());
-      result.receivedSha256 = createHash('sha256').update(bytes).digest('hex');
-      result.outcome = `received the file over a ${route.replace(/^connected \((.*)\)$/, '$1').toLowerCase()}`;
-      mark('file received');
+    if (relay && result.outcome.startsWith('failed')) {
+      result.said.push(result.outcome);
+      result.outcome = await receive('through preprati.');
+    } else if (result.outcome.startsWith('connected')) {
+      const route = result.outcome.replace(/^connected \((.*)\)$/, '$1').toLowerCase();
+      result.outcome = await receive(`over a ${route}`);
     }
   } else {
     await waitForFile(codeFile, 60_000);
     await page.goto(`${base}/j/${readFileSync(codeFile, 'utf8').trim()}`);
     result.outcome = await connect();
-    if (result.outcome.startsWith('connected')) {
-      const file = `${dir}/payload-${tag}.bin`;
-      const data = randomBytes(Math.round(Number(payloadMb) * 1_000_000));
-      writeFileSync(file, data);
-      result.sentSha256 = createHash('sha256').update(data).digest('hex');
-      await page.locator('input[type=file]').setInputFiles(file);
+    if (relay && result.outcome.startsWith('failed')) {
+      result.said.push(result.outcome);
+      await page.locator('input[type=file]').setInputFiles(payload());
+      await page.getByRole('button', { name: 'Send through preprati.' }).click();
+      mark('pressed "Send through preprati."');
+      await page.getByText(/Sent! 1 file delivered to/).waitFor({ timeout: 180_000 });
+      result.outcome = `sent ${payloadMb} MB through preprati.`;
+      mark('file sent');
+    } else if (result.outcome.startsWith('connected')) {
+      await page.locator('input[type=file]').setInputFiles(payload());
       await page.getByRole('button', { name: 'Send 1 file' }).click();
       writeFileSync(`${dir}/sending-${tag}`, '');
       await page.getByText(/Sent! 1 file delivered to/).waitFor({ timeout: 180_000 });
@@ -160,7 +182,8 @@ try {
       mark('file sent');
     }
   }
-  if (result.outcome.startsWith('failed')) result.said.push(result.outcome);
+  if (result.outcome.startsWith('failed') && !result.said.includes(result.outcome))
+    result.said.push(result.outcome);
 } catch (error) {
   result.outcome = `error: ${String(error.message).split('\n')[0]}`;
 }

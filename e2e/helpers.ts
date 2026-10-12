@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, type Dirent } from 'node:fs';
 import path from 'node:path';
 import { expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import jsQR from 'jsqr';
@@ -108,13 +108,25 @@ export function readStoredZip(zip: Buffer): Map<string, Buffer> {
  * to an address nobody answers on. Later attempts ("Try again") work normally.
  */
 export async function blockFirstConnection(context: BrowserContext): Promise<void> {
-  await context.addInitScript(() => {
+  await blockConnections(context, 1);
+}
+
+/**
+ * Makes every WebRTC connection attempt in this browser context impossible,
+ * like a Wi-Fi network that keeps its devices apart.
+ */
+export async function blockAllConnections(context: BrowserContext): Promise<void> {
+  await blockConnections(context, Number.MAX_SAFE_INTEGER);
+}
+
+async function blockConnections(context: BrowserContext, count: number): Promise<void> {
+  await context.addInitScript((blocked: number) => {
     const Native = window.RTCPeerConnection;
     let created = 0;
     window.RTCPeerConnection = class extends Native {
       constructor(...args: ConstructorParameters<typeof RTCPeerConnection>) {
         super(...args);
-        if (created++ > 0) return;
+        if (created++ >= blocked) return;
         const add = this.addIceCandidate.bind(this);
         this.addIceCandidate = (candidate?: RTCIceCandidateInit | null) => {
           if (!candidate?.candidate) return add(candidate ?? undefined);
@@ -124,5 +136,25 @@ export async function blockFirstConnection(context: BrowserContext): Promise<voi
         };
       }
     };
-  });
+  }, count);
+}
+
+/** Files of encrypted share packages still stored under `dir` (deletion tombstones aside). */
+export function storedPackageData(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (current: string) => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name !== 'meta.json') out.push(full);
+    }
+  };
+  walk(dir);
+  return out;
 }

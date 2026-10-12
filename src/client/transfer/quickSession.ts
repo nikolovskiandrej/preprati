@@ -19,11 +19,17 @@
  * with ICE restarts (see PeerLink) and the other device's departure is
  * reported by the channel itself.
  *
- * File names and contents only ever travel over the encrypted data channel;
- * the signaling server sees device labels and WebRTC negotiation only.
+ * When the devices can't connect directly, the sender can switch the session
+ * to relay mode ("Send through preprati."): the files travel as a temporary,
+ * end-to-end encrypted share package instead (see ./relay.ts), and the rest
+ * of the session — offer, accept, progress, received files — stays the same.
+ *
+ * File names and contents only ever travel over the encrypted data channel
+ * or, in relay mode, encrypted end to end; the signaling server sees device
+ * labels, WebRTC negotiation and ciphertext only.
  */
 import { MAX_CONNECTION_ATTEMPTS } from '../../shared/constants';
-import { appUrl, isWebRtcAvailable, signalingUrl } from '../lib/env';
+import { appUrl, isSecureContextAvailable, isWebRtcAvailable, signalingUrl } from '../lib/env';
 import { loadPublicConfig } from '../lib/runtimeConfig';
 import { deviceLabel } from '../lib/device';
 import { RateMeter, type RateEstimate } from '../lib/rateMeter';
@@ -41,11 +47,25 @@ import {
   type ConnectionDiagnostics,
   type FailureCause,
 } from './diagnostics';
-import { TransferEngine, type ReceivedFile, type TransferSnapshot } from './engine';
+import {
+  TransferEngine,
+  type EngineEvent,
+  type FileTransport,
+  type ReceivedFile,
+  type TransferSnapshot,
+} from './engine';
 import { countIceServers, toRtcIceServers } from './iceConfig';
 import { PeerLink, type ConnectionRoute } from './peerLink';
 import { HttpSignalingClient } from './httpSignalingClient';
-import { SignalingClient, type SignalingTransport } from './signalingClient';
+import { RelayEngine, type RelayLimits, type RelayStorage } from './relay';
+import {
+  createRelayKeyPair,
+  deriveRelayKey,
+  type RelayKeyPair,
+  type RelaySide,
+} from './relayCrypto';
+import { shareRelayStorage } from './relayStorage';
+import { SignalingClient, type SignalingPace, type SignalingTransport } from './signalingClient';
 
 export type QuickPhase =
   | 'idle'
@@ -78,6 +98,8 @@ export type QuickErrorCode =
   | 'peer-left'
   | 'peer-ended'
   | 'connection-failed'
+  /** The sender proposed relay mode and the other device never answered. */
+  | 'relay-unanswered'
   | 'connection-lost'
   | 'protocol-error'
   | 'file-read-failed'
@@ -117,6 +139,13 @@ export interface QuickState {
   failure: { cause: FailureCause; diagnostics: ConnectionDiagnostics } | null;
   /** "Try again" can reconnect within this session, without a new code. */
   canRetry: boolean;
+  /**
+   * Relay mode is available on this server and in this browser: its size
+   * limits, and how long a package may stay stored at most.
+   */
+  relay: { limits: RelayLimits; ttlSeconds: number } | null;
+  /** The sender can switch this session to relay mode now ("Send through preprati."). */
+  canRelay: boolean;
 }
 
 export interface QuickSessionOptions {
@@ -126,6 +155,16 @@ export interface QuickSessionOptions {
   signalingUrl?: string;
   /** Overrides transport selection (tests). */
   createSignaling?: () => SignalingTransport;
+  /** Overrides relay mode's storage and limits, read from the server otherwise (tests). */
+  relay?: RelaySetup;
+}
+
+interface RelaySetup {
+  storage: RelayStorage;
+  limits: RelayLimits;
+  ttlSeconds: number;
+  /** How long a relay proposal waits for the other device's answer. */
+  answerTimeoutMs?: number;
 }
 
 const INITIAL: QuickState = {
@@ -143,6 +182,8 @@ const INITIAL: QuickState = {
   error: null,
   failure: null,
   canRetry: false,
+  relay: null,
+  canRelay: false,
 };
 
 /** Longest wait for the server to confirm a new or joined session. */
@@ -151,6 +192,10 @@ const SETUP_TIMEOUT_MS = 20_000;
 const RETRY_WINDOW_MS = 5 * 60_000;
 /** A guest that asked for another attempt waits this long for the host's new offer. */
 const RETRY_WAIT_MS = 30_000;
+/** A sender that proposed relay mode waits this long for the other device's answer. */
+const RELAY_WAIT_MS = 20_000;
+/** Relay messages kept while the relay is still being set up (only a few can be early). */
+const MAX_PENDING_RELAY_MESSAGES = 32;
 
 /** Every field that describes one connection, reset whenever a new one starts. */
 const FRESH_CONNECTION = {
@@ -160,9 +205,10 @@ const FRESH_CONNECTION = {
   failure: null,
 } satisfies Partial<QuickState>;
 
-const attemptOf = (payload: SignalPayload): number => payload.attempt ?? 0;
+const attemptOf = (payload: SignalPayload): number =>
+  'attempt' in payload ? (payload.attempt ?? 0) : 0;
 
-type SessionTimer = 'setup' | 'retry-window' | 'retry-wait';
+type SessionTimer = 'setup' | 'retry-window' | 'retry-wait' | 'relay-wait';
 
 function mapSignalingError(code: SignalingErrorCode): QuickErrorCode {
   switch (code) {
@@ -183,8 +229,20 @@ export class QuickSession {
   private readonly listeners = new Set<() => void>();
   private signaling: SignalingTransport | null = null;
   private peerLink: PeerLink | null = null;
-  private engine: TransferEngine | null = null;
+  /** Moves the files: TransferEngine over the direct connection, RelayEngine in relay mode. */
+  private engine: FileTransport | null = null;
   private iceServers: IceServerConfig[] = [];
+  private sessionId: string | null = null;
+  private relaySetup: RelaySetup | null = null;
+  /** Sender: own key pair, from proposing relay mode until the receiver's half arrives. */
+  private relayKeys: RelayKeyPair | null = null;
+  private relayPending = false;
+  /** Receiver: the sender's public key of the relay currently set up. */
+  private relayPeerKey: string | null = null;
+  /** Relay messages that arrived while the relay key was still being derived. */
+  private pendingRelayMessages: Array<{ seq: number; data: string }> = [];
+  /** Offer the selected files as soon as the relay is up (the sender chose "Send through"). */
+  private offerWhenRelayReady = false;
   /** Signals that arrived before the peer connection they belong to exists. */
   private pendingSignals: SignalPayload[] = [];
   private peerSaidBye = false;
@@ -196,7 +254,10 @@ export class QuickSession {
   private attempt = 0;
   private readonly timers = new Map<SessionTimer, ReturnType<typeof setTimeout>>();
 
-  constructor(private readonly options: QuickSessionOptions = {}) {}
+  constructor(private readonly options: QuickSessionOptions = {}) {
+    if (typeof document !== 'undefined')
+      document.addEventListener('visibilitychange', this.handleVisibility);
+  }
 
   /* ------------------------------------------------------------------------ */
   /* Store interface (useSyncExternalStore)                                   */
@@ -228,6 +289,7 @@ export class QuickSession {
     if (!client) return;
     client.send({ type: 'create-session', role, device: { label: deviceLabel() } });
     this.armSetupTimeout(generation, 'creating-session');
+    void this.loadRelaySetup(generation);
   }
 
   /** Joins a session from a link (session id) or a typed pairing code. */
@@ -245,6 +307,7 @@ export class QuickSession {
     if (!client) return;
     client.send({ type: 'join-session', target, device: { label: deviceLabel() } });
     this.armSetupTimeout(generation, 'joining');
+    void this.loadRelaySetup(generation);
   }
 
   approvePeer(): void {
@@ -292,8 +355,46 @@ export class QuickSession {
         iceStates: [],
         durationMs: RETRY_WAIT_MS,
         restarts: 0,
+        sameNetwork: false,
       });
     });
+  }
+
+  /**
+   * Sender: sends the files through temporary, end-to-end encrypted storage
+   * instead of a direct connection (which failed, or is taking too long).
+   * The selected files are offered as soon as the other device is ready.
+   */
+  useRelay(): void {
+    if (!this.state.canRelay || !this.signaling) return;
+    const generation = this.generation;
+    this.releasePeer(); // a direct attempt that is still trying
+    this.clearTimer('retry-window');
+    this.clearTimer('retry-wait');
+    this.relayPending = true;
+    this.offerWhenRelayReady = this.state.pendingFiles.length > 0;
+    this.signaling.setPace?.('normal');
+    this.update({ ...FRESH_CONNECTION, route: 'server' }, 'connecting');
+    createRelayKeyPair()
+      .then((keys) => {
+        if (generation !== this.generation || !this.relayPending) return;
+        this.relayKeys = keys;
+        this.signaling?.send({
+          type: 'signal',
+          payload: { kind: 'relay-hello', key: keys.publicKey },
+        });
+        this.setTimer('relay-wait', this.relaySetup?.answerTimeoutMs ?? RELAY_WAIT_MS, () => {
+          if (generation !== this.generation || !this.relayPending) return;
+          this.relayPending = false;
+          this.signaling?.setPace?.('standby');
+          this.update({ ...FRESH_CONNECTION, error: 'relay-unanswered' }, 'failed');
+        });
+      })
+      .catch(() => {
+        if (generation !== this.generation) return;
+        this.relayPending = false;
+        this.update({ ...FRESH_CONNECTION, error: 'internal' }, 'failed');
+      });
   }
 
   /** Sender: replaces the selection that will be offered next. */
@@ -333,10 +434,17 @@ export class QuickSession {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (typeof document !== 'undefined')
+      document.removeEventListener('visibilitychange', this.handleVisibility);
     this.teardown(true);
     this.state = { ...INITIAL };
     this.listeners.clear();
   }
+
+  /** Back in the foreground (phones pause background pages): repair a dropped path now. */
+  private readonly handleVisibility = () => {
+    if (document.visibilityState === 'visible') this.peerLink?.resume();
+  };
 
   /* ------------------------------------------------------------------------ */
   /* Signaling                                                                */
@@ -361,6 +469,10 @@ export class QuickSession {
     client.onClose(() => {
       if (generation !== this.generation) return;
       this.signaling = null;
+      if (this.engine instanceof RelayEngine) {
+        this.handlePeerGone(); // relay mode can't go on without signaling
+        return;
+      }
       // A peer connection in progress may still finish (its candidates may all be
       // exchanged), and an open one no longer needs signaling at all.
       if (this.peerLink || this.isTerminal()) {
@@ -383,6 +495,7 @@ export class QuickSession {
     switch (message.type) {
       case 'session-created':
         this.clearTimer('setup');
+        this.sessionId = message.sessionId;
         this.iceServers = message.iceServers;
         this.update(
           {
@@ -399,6 +512,7 @@ export class QuickSession {
         return;
       case 'session-joined':
         this.clearTimer('setup');
+        this.sessionId = message.sessionId;
         this.iceServers = message.iceServers;
         this.update(
           { role: message.role, peer: { label: message.peer.label, via: null } },
@@ -429,6 +543,13 @@ export class QuickSession {
           this.update({ peer: null }, 'waiting-for-peer');
           return;
         }
+        if (this.engine instanceof RelayEngine) {
+          // Relay mode lives on signaling: the other device leaving ends it. Leaving on
+          // purpose is how a relaying device says goodbye.
+          if (message.reason !== 'gone') this.peerSaidBye = true;
+          this.handlePeerGone();
+          return;
+        }
         if (message.reason === 'gone' && this.peerLink?.isOpen) {
           // The other device went quiet on the signaling side (a phone that put the page in
           // the background, a dropped server connection), but the direct connection works
@@ -438,7 +559,10 @@ export class QuickSession {
           this.update({});
           return;
         }
-        if (this.linkPhase === 'failed' && this.state.error === 'connection-failed') {
+        if (
+          this.linkPhase === 'failed' &&
+          (this.state.error === 'connection-failed' || this.state.error === 'relay-unanswered')
+        ) {
           // Nobody is left to retry with; keep explaining the failure itself.
           this.closeSignaling();
           this.update({});
@@ -486,6 +610,16 @@ export class QuickSession {
 
   /** Hands a signal to the peer connection of its attempt (or keeps it until that exists). */
   private routeSignal(payload: SignalPayload): void {
+    if (payload.kind === 'relay-hello') {
+      void this.handleRelayHello(payload.key, payload.reply ?? null);
+      return;
+    }
+    if (payload.kind === 'relay-message') {
+      if (this.engine instanceof RelayEngine) this.engine.handleMessage(payload.seq, payload.data);
+      else if (this.pendingRelayMessages.length < MAX_PENDING_RELAY_MESSAGES)
+        this.pendingRelayMessages.push({ seq: payload.seq, data: payload.data });
+      return;
+    }
     if (payload.kind === 'retry') {
       // A guest asks for another attempt; the host decides the attempt numbers.
       if (
@@ -545,45 +679,7 @@ export class QuickSession {
     this.peerLink = link;
     this.engine = new TransferEngine(link.channel, {
       getMaxMessageSize: () => link.maxMessageSize,
-      onEvent: (event) => {
-        if (generation !== this.generation) return;
-        switch (event.type) {
-          case 'ready':
-            this.signaling?.setPace?.('quiet');
-            this.update({}, 'connected');
-            void link.route().then((route) => {
-              if (generation === this.generation) this.update({ route });
-            });
-            this.maybeAutoOffer();
-            return;
-          case 'version-mismatch':
-            this.update({ error: 'version-mismatch' }, 'failed');
-            this.releasePeer();
-            return;
-          case 'transfer': {
-            const transfer = event.transfer;
-            if (transfer.id !== this.meterTransferId) {
-              this.meter.reset();
-              this.meterTransferId = transfer.id;
-            }
-            const rate =
-              transfer.status === 'transferring'
-                ? this.meter.push(transfer.transferredBytes, transfer.totalBytes)
-                : null;
-            this.update({ transfer, rate });
-            return;
-          }
-          case 'file-received':
-            this.update({ received: [...this.state.received, event.file] });
-            return;
-          case 'peer-bye':
-            this.peerSaidBye = true;
-            return;
-          case 'channel-closed':
-            this.handlePeerGone();
-            return;
-        }
-      },
+      onEvent: (event) => this.handleEngineEvent(event, generation, link),
     });
     this.update({}, 'connecting');
     // Signals that arrived early: apply this attempt's, keep any for a later one.
@@ -598,6 +694,54 @@ export class QuickSession {
         this.releasePeer();
       }
     });
+  }
+
+  /** Events of either engine; `link` is the direct connection (absent in relay mode). */
+  private handleEngineEvent(event: EngineEvent, generation: number, link?: PeerLink): void {
+    if (generation !== this.generation) return;
+    switch (event.type) {
+      case 'ready':
+        if (link) {
+          this.signaling?.setPace?.('quiet');
+          this.update({}, 'connected');
+          void link.route().then((route) => {
+            if (generation === this.generation && this.peerLink === link) this.update({ route });
+          });
+        } else {
+          this.signaling?.setPace?.('standby');
+          this.update({ route: 'server' }, 'connected');
+        }
+        this.maybeAutoOffer();
+        return;
+      case 'version-mismatch':
+        this.update({ error: 'version-mismatch' }, 'failed');
+        this.releasePeer();
+        return;
+      case 'transfer': {
+        const transfer = event.transfer;
+        const meterKey = `${transfer.id}:${transfer.stage ?? ''}`;
+        if (meterKey !== this.meterTransferId) {
+          this.meter.reset();
+          this.meterTransferId = meterKey;
+        }
+        const rate =
+          transfer.status === 'transferring'
+            ? this.meter.push(transfer.transferredBytes, transfer.totalBytes)
+            : null;
+        if (!link) this.signaling?.setPace?.(relayPace(transfer));
+        this.update({ transfer, rate });
+        return;
+      }
+      case 'file-received':
+        this.update({ received: [...this.state.received, event.file] });
+        return;
+      case 'peer-bye':
+        this.peerSaidBye = true;
+        return;
+      case 'channel-closed':
+        this.handlePeerGone();
+        return;
+    }
   }
 
   private createPeerLink(isOfferer: boolean, generation: number): PeerLink {
@@ -628,6 +772,105 @@ export class QuickSession {
         this.update({ reconnecting });
       },
     });
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* Relay mode                                                               */
+  /* ------------------------------------------------------------------------ */
+
+  /** Relay mode needs Web Crypto and a server with share storage. */
+  private async loadRelaySetup(generation: number): Promise<void> {
+    let setup: RelaySetup | null = this.options.relay ?? null;
+    if (!setup && isSecureContextAvailable()) {
+      const config = await loadPublicConfig().catch(() => null);
+      if (config?.share.enabled) {
+        const share = config.share;
+        setup = {
+          storage: shareRelayStorage(share.chunkBytes),
+          limits: {
+            maxFiles: share.maxFiles,
+            maxFileBytes: share.maxFileBytes,
+            maxPackageBytes: share.maxPackageBytes,
+          },
+          ttlSeconds: share.ttlSeconds,
+        };
+      }
+    }
+    if (!setup || generation !== this.generation || this.disposed) return;
+    this.relaySetup = setup;
+    this.update({ relay: { limits: setup.limits, ttlSeconds: setup.ttlSeconds } });
+  }
+
+  /**
+   * One half of the relay key agreement from the other device: a proposal
+   * (from the sender) or an answer to one (from the receiver, `reply` naming
+   * the proposal). A receiver answers with its own half and is ready; a
+   * sender completes the proposal it made — also when the answer comes late.
+   * A receiver accepts a new proposal at any time (the sender started over),
+   * unless a transfer is running.
+   */
+  private async handleRelayHello(peerKey: string, reply: string | null): Promise<void> {
+    const generation = this.generation;
+    const setup = this.relaySetup;
+    const sessionId = this.sessionId;
+    if (!setup || !sessionId) return; // no relay here: the sender's proposal times out
+    try {
+      if (this.state.role === 'receiver') {
+        if (reply || peerKey === this.relayPeerKey || this.engine?.busy) return;
+        this.relayPeerKey = peerKey;
+        const own = await createRelayKeyPair();
+        const key = await deriveRelayKey(own, peerKey, {
+          sessionId,
+          senderKey: peerKey,
+          receiverKey: own.publicKey,
+        });
+        if (generation !== this.generation || this.relayPeerKey !== peerKey) return;
+        this.signaling?.send({
+          type: 'signal',
+          payload: { kind: 'relay-hello', key: own.publicKey, reply: peerKey },
+        });
+        this.startRelay(key, 'receiver', setup);
+        return;
+      }
+      const own = this.relayKeys;
+      if (!own || reply !== own.publicKey || this.engine instanceof RelayEngine) return;
+      const key = await deriveRelayKey(own, peerKey, {
+        sessionId,
+        senderKey: own.publicKey,
+        receiverKey: peerKey,
+      });
+      const waiting =
+        this.relayPending ||
+        (this.linkPhase === 'failed' && this.state.error === 'relay-unanswered');
+      if (generation !== this.generation || this.relayKeys !== own || !waiting) return;
+      this.startRelay(key, 'sender', setup);
+    } catch {
+      // An unusable key: ignore it (a sender's proposal then times out).
+    }
+  }
+
+  private startRelay(key: CryptoKey, side: RelaySide, setup: RelaySetup): void {
+    const generation = this.generation;
+    this.releasePeer();
+    this.clearTimer('retry-window');
+    this.clearTimer('retry-wait');
+    this.clearTimer('relay-wait');
+    this.relayPending = false;
+    this.relayKeys = null;
+    const engine = new RelayEngine({
+      side,
+      key,
+      storage: setup.storage,
+      limits: setup.limits,
+      send: (payload) => this.signaling?.send({ type: 'signal', payload }),
+      onEvent: (event) => this.handleEngineEvent(event, generation),
+    });
+    this.engine = engine;
+    this.update({ ...FRESH_CONNECTION, route: 'server' }, 'connecting');
+    const early = this.pendingRelayMessages;
+    this.pendingRelayMessages = [];
+    for (const message of early) engine.handleMessage(message.seq, message.data);
+    engine.start();
   }
 
   /** Reports a failed attempt and keeps signaling (slowly) for a possible "Try again". */
@@ -662,8 +905,13 @@ export class QuickSession {
   }
 
   private maybeAutoOffer(): void {
-    if (!this.options.autoOffer || !this.state.isHost || this.state.role !== 'sender') return;
-    if (this.linkPhase !== 'connected' || this.state.transfer) return;
+    if (this.state.role !== 'sender' || this.linkPhase !== 'connected') return;
+    if (this.offerWhenRelayReady && this.engine instanceof RelayEngine) {
+      this.offerWhenRelayReady = false;
+      this.send();
+      return;
+    }
+    if (!this.options.autoOffer || !this.state.isHost || this.state.transfer) return;
     this.send();
   }
 
@@ -684,6 +932,12 @@ export class QuickSession {
     this.peerSaidBye = false;
     this.pendingSignals = [];
     this.attempt = 0;
+    this.sessionId = null;
+    this.relayKeys = null;
+    this.relayPending = false;
+    this.relayPeerKey = null;
+    this.pendingRelayMessages = [];
+    this.offerWhenRelayReady = false;
     this.generation += 1;
     return this.generation;
   }
@@ -740,14 +994,29 @@ export class QuickSession {
     if (linkPhase) this.linkPhase = linkPhase;
     const next: QuickState = { ...this.state, ...patch };
     next.phase = derivePhase(this.linkPhase, next.transfer);
-    next.canRetry =
+    const failedToConnect =
       this.linkPhase === 'failed' &&
-      next.error === 'connection-failed' &&
+      (next.error === 'connection-failed' || next.error === 'relay-unanswered');
+    next.canRetry =
+      failedToConnect && !!this.signaling?.isOpen && this.attempt + 1 < MAX_CONNECTION_ATTEMPTS;
+    next.canRelay =
+      !!this.relaySetup &&
+      next.role === 'sender' &&
+      !!next.peer &&
       !!this.signaling?.isOpen &&
-      this.attempt + 1 < MAX_CONNECTION_ATTEMPTS;
+      !this.relayPending &&
+      !(this.engine instanceof RelayEngine) &&
+      (failedToConnect || this.linkPhase === 'peer-connected' || this.linkPhase === 'connecting');
     this.state = next;
     for (const listener of [...this.listeners]) listener();
   }
+}
+
+/** How eagerly to poll in relay mode, where control messages travel over signaling. */
+function relayPace(transfer: TransferSnapshot): SignalingPace {
+  if (transfer.status === 'transferring') return 'live';
+  if (transfer.status === 'offered' || transfer.status === 'awaiting-acceptance') return 'normal';
+  return 'standby';
 }
 
 /** Public phase: the connection phase, refined by the transfer status once connected. */

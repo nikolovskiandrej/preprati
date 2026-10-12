@@ -8,10 +8,18 @@ export type Recovery = 'restart' | 'retry-send' | 'home' | 'rejoin';
 export interface QuickErrorView {
   title: MessageKey;
   message: MessageKey;
+  /** `message` and `hint` may mention the other device as `{device}`. */
   hint?: MessageKey;
   recovery: Recovery;
-  /** Set when a connection attempt failed: "Try again", the share-link fallback and details. */
-  connection?: { canRetry: boolean; diagnostics: ConnectionDiagnostics | null };
+  /**
+   * Set when the devices couldn't connect: "Try again", relay mode ("Send
+   * through preprati.", the sender's choice), the share-link fallback and details.
+   */
+  connection?: {
+    canRetry: boolean;
+    canRelay: boolean;
+    diagnostics: ConnectionDiagnostics | null;
+  };
 }
 
 const BY_CODE: Record<QuickErrorCode, Omit<QuickErrorView, 'recovery'>> = {
@@ -33,6 +41,7 @@ const BY_CODE: Record<QuickErrorCode, Omit<QuickErrorView, 'recovery'>> = {
     message: 'errors.connectionFailed',
     hint: 'errors.connectionFailedRelay',
   },
+  'relay-unanswered': { title: 'errors.titles.connection', message: 'errors.relayUnanswered' },
   'connection-lost': { title: 'errors.titles.disconnected', message: 'errors.connectionLost' },
   'protocol-error': { title: 'errors.titles.transfer', message: 'errors.protocolError' },
   'file-read-failed': { title: 'errors.titles.transfer', message: 'errors.fileReadFailed' },
@@ -44,6 +53,7 @@ const BY_CODE: Record<QuickErrorCode, Omit<QuickErrorView, 'recovery'>> = {
 const BY_CAUSE: Record<FailureCause, MessageKey> = {
   'same-network-only': 'errors.connectionSameNetwork',
   'no-remote-details': 'errors.connectionNoAnswer',
+  'same-network-blocked': 'errors.connectionSameNetworkBlocked',
   'local-network': 'errors.connectionLocalNetwork',
   'remote-network': 'errors.connectionRemoteNetwork',
   'incompatible-networks': 'errors.connectionIncompatible',
@@ -54,6 +64,9 @@ const BY_TRANSFER: Record<TransferErrorCode, Omit<QuickErrorView, 'recovery'>> =
   'protocol-error': BY_CODE['protocol-error'],
   'file-read-failed': BY_CODE['file-read-failed'],
   'peer-error': { title: 'errors.titles.transfer', message: 'errors.peerError' },
+  'relay-too-large': { title: 'errors.titles.transfer', message: 'errors.relayTooLarge' },
+  'relay-storage': { title: 'errors.titles.transfer', message: 'errors.relayStorage' },
+  'relay-network': { title: 'errors.titles.transfer', message: 'errors.relayNetwork' },
 };
 
 /**
@@ -81,6 +94,12 @@ export function describeQuickError(
           : 'home';
     if (code === 'connection-failed')
       return describeConnectionFailure(state, shareAvailable, recovery);
+    if (code === 'relay-unanswered')
+      return {
+        ...BY_CODE[code],
+        recovery,
+        connection: { canRetry: state.canRetry, canRelay: state.canRelay, diagnostics: null },
+      };
     return { ...BY_CODE[code], recovery };
   }
   if (state.phase === 'failed' && state.transfer?.error) {
@@ -96,18 +115,29 @@ function describeConnectionFailure(
   recovery: Recovery,
 ): QuickErrorView {
   const failure = state.failure;
-  const linkHint: MessageKey | undefined = !shareAvailable
-    ? undefined
-    : state.role === 'sender'
-      ? 'errors.connectionLinkSender'
-      : state.role === 'receiver'
-        ? 'errors.connectionLinkReceiver'
-        : undefined;
+  // The receiver can't start relay mode, but the sender can — often the same person, on
+  // the other device. Relay mode needs signaling, which "Try again" also needs.
+  const relayHint: MessageKey | undefined =
+    state.role === 'receiver' && state.relay && state.canRetry
+      ? 'errors.connectionRelayReceiver'
+      : undefined;
+  const linkHint: MessageKey | undefined =
+    !shareAvailable || state.canRelay
+      ? undefined
+      : state.role === 'sender'
+        ? 'errors.connectionLinkSender'
+        : state.role === 'receiver'
+          ? 'errors.connectionLinkReceiver'
+          : undefined;
   return {
     title: 'errors.titles.connection',
     message: failure ? BY_CAUSE[failure.cause] : 'errors.connectionFailed',
-    hint: linkHint ?? (failure ? undefined : 'errors.connectionFailedRelay'),
+    hint: relayHint ?? linkHint ?? (failure ? undefined : 'errors.connectionFailedRelay'),
     recovery,
-    connection: { canRetry: state.canRetry, diagnostics: failure?.diagnostics ?? null },
+    connection: {
+      canRetry: state.canRetry,
+      canRelay: state.canRelay,
+      diagnostics: failure?.diagnostics ?? null,
+    },
   };
 }

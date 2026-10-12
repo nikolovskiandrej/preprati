@@ -15,23 +15,10 @@ import { appUrl, isSecureContextAvailable } from '../lib/env';
 import { localFileId, totalSize, type SelectedFile } from '../lib/files';
 import { HttpError, withRetry } from '../lib/http';
 import { RateMeter } from '../lib/rateMeter';
-import {
-  createShare,
-  deleteShare,
-  finalizeShare,
-  ownerStatus,
-  uploadChunk,
-  uploadManifest,
-} from './api';
-import {
-  deriveShareKeys,
-  encodeShareSecret,
-  encryptChunk,
-  encryptManifest,
-  generateShareSecret,
-} from './crypto';
-import { buildManifest, cipherBytesFor, plainChunkLength, readPlainChunk } from './manifest';
+import { deleteShare, ownerStatus } from './api';
+import { encodeShareSecret } from './crypto';
 import { forgetOwnedShare, rememberOwnedShare } from './ownedShares';
+import { FileReadFailure, uploadPackage } from './upload';
 
 export type CreatorPhase =
   | 'selecting-files'
@@ -91,7 +78,6 @@ export interface CreatorState {
 
 export type ShareLimits = Extract<PublicConfig['share'], { enabled: true }>;
 
-const UPLOAD_CONCURRENCY = 3;
 const STATUS_POLL_MS = 15_000;
 
 const INITIAL: CreatorState = {
@@ -197,11 +183,7 @@ export class ShareCreator {
 
     const controller = new AbortController();
     this.controller = controller;
-    const { signal } = controller;
     const files = this.state.files.map(({ file }) => file);
-    const chunkBytes = this.limits.chunkBytes;
-    let shareId: string | null = null;
-    let token: string | null = null;
 
     try {
       this.update({
@@ -211,128 +193,54 @@ export class ShareCreator {
         result: null,
         accessCount: 0,
       });
-      const secret = generateShareSecret();
-      const keys = await deriveShareKeys(secret);
-      const manifest = buildManifest(files, chunkBytes);
-      const sealedManifest = await encryptManifest(keys.manifest, manifest);
-      const cipherBytes = cipherBytesFor(manifest.totalBytes, chunkBytes);
-
-      const created = await withRetry(
-        () =>
-          createShare(
-            {
-              chunkBytes,
-              chunkCount: manifest.chunkCount,
-              cipherBytes,
-              manifestBytes: sealedManifest.byteLength,
-            },
-            signal,
-          ),
-        { signal, attempts: 2 },
-      );
-      shareId = created.id;
-      token = created.ownerToken;
-      this.ownerToken = token;
-      const id = created.id;
-      const ownerToken = created.ownerToken;
-
-      await withRetry(() => uploadManifest(id, ownerToken, sealedManifest, signal), { signal });
-
-      const startedAt = Date.now();
+      let startedAt = Date.now();
       const meter = new RateMeter();
-      this.update({
-        phase: 'uploading',
-        progress: {
-          uploadedBytes: 0,
-          totalBytes: manifest.totalBytes,
-          startedAt,
-          bytesPerSecond: null,
-          etaSeconds: null,
+      const uploaded = await uploadPackage(files, this.limits.chunkBytes, {
+        signal: controller.signal,
+        onUploading: (totalBytes) => {
+          startedAt = Date.now();
+          this.update({
+            phase: 'uploading',
+            progress: {
+              uploadedBytes: 0,
+              totalBytes,
+              startedAt,
+              bytesPerSecond: null,
+              etaSeconds: null,
+            },
+          });
         },
+        onProgress: (uploadedBytes, totalBytes) => {
+          const rate = meter.push(uploadedBytes, totalBytes);
+          this.update({ progress: { uploadedBytes, totalBytes, startedAt, ...rate } });
+        },
+        onFinalizing: () => this.update({ phase: 'finalizing' }),
       });
-
-      let next = 0;
-      let completedBytes = 0;
-      const inFlight = new Map<number, number>();
-      let lastEmit = 0;
-      const report = (force = false) => {
-        const now = Date.now();
-        if (!force && now - lastEmit < 100) return;
-        lastEmit = now;
-        let partial = 0;
-        for (const value of inFlight.values()) partial += value;
-        const uploadedBytes = Math.min(manifest.totalBytes, completedBytes + partial);
-        const rate = meter.push(uploadedBytes, manifest.totalBytes);
-        this.update({
-          progress: { uploadedBytes, totalBytes: manifest.totalBytes, startedAt, ...rate },
-        });
-      };
-
-      const worker = async () => {
-        for (;;) {
-          const index = next++;
-          if (index >= manifest.chunkCount || signal.aborted) return;
-          let plain: Uint8Array<ArrayBuffer>;
-          try {
-            plain = await readPlainChunk(files, manifest, index);
-          } catch {
-            throw new FileReadFailure();
-          }
-          // Encrypt before anything leaves the browser; retries resend these exact bytes.
-          const sealed = await encryptChunk(keys.content, plain, index, manifest.chunkCount);
-          const plainLength = plainChunkLength(manifest, index);
-          await withRetry(
-            () =>
-              uploadChunk(id, ownerToken, index, sealed, {
-                signal,
-                onProgress: (sent) => {
-                  inFlight.set(
-                    index,
-                    Math.min(plainLength, (sent / sealed.byteLength) * plainLength),
-                  );
-                  report();
-                },
-              }),
-            { signal, attempts: 5 },
-          );
-          inFlight.delete(index);
-          completedBytes += plainLength;
-          report(true);
-        }
-      };
-      await Promise.all(
-        Array.from(
-          { length: Math.min(UPLOAD_CONCURRENCY, Math.max(1, manifest.chunkCount)) },
-          worker,
-        ),
-      );
-      if (signal.aborted) throw new HttpError('aborted', 0, 'Upload cancelled');
-
-      this.update({ phase: 'finalizing' });
-      const finalized = await withRetry(() => finalizeShare(id, ownerToken, signal), { signal });
+      const { id, ownerToken } = uploaded;
+      this.ownerToken = ownerToken;
 
       const result: ShareResult = {
         id,
-        url: appUrl(`/s/${id}#${encodeShareSecret(secret)}`),
-        expiresAt: finalized.expiresAt,
+        url: appUrl(`/s/${id}#${encodeShareSecret(uploaded.secret)}`),
+        expiresAt: uploaded.expiresAt,
         fileCount: files.length,
-        totalBytes: manifest.totalBytes,
+        totalBytes: uploaded.totalBytes,
       };
       rememberOwnedShare({
         id,
         ownerToken,
         createdAt: Date.now(),
-        expiresAt: finalized.expiresAt,
+        expiresAt: uploaded.expiresAt,
         fileCount: files.length,
-        totalBytes: manifest.totalBytes,
+        totalBytes: uploaded.totalBytes,
       });
       this.controller = null;
       this.update({
         phase: 'ready-to-share',
         result,
         progress: {
-          uploadedBytes: manifest.totalBytes,
-          totalBytes: manifest.totalBytes,
+          uploadedBytes: uploaded.totalBytes,
+          totalBytes: uploaded.totalBytes,
           startedAt,
           bytesPerSecond: null,
           etaSeconds: null,
@@ -340,10 +248,8 @@ export class ShareCreator {
       });
       this.startWatching(result);
     } catch (error) {
-      controller.abort();
+      // uploadPackage already removed whatever was uploaded.
       this.controller = null;
-      // Remove whatever was uploaded so far; the server also expires abandoned uploads.
-      if (shareId && token) void deleteShare(shareId, token).catch(() => undefined);
       this.ownerToken = null;
       if (this.disposed) return;
       if (error instanceof HttpError && error.code === 'aborted') {
@@ -447,9 +353,7 @@ export class ShareCreator {
   }
 }
 
-class FileReadFailure extends Error {}
-
-function toCreatorError(error: unknown): CreatorErrorCode {
+export function toCreatorError(error: unknown): CreatorErrorCode {
   if (error instanceof FileReadFailure) return 'file-read-failed';
   if (error instanceof HttpError) {
     switch (error.code) {

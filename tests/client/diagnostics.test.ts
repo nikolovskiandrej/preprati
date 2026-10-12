@@ -3,6 +3,7 @@ import {
   CandidateLog,
   classifyFailure,
   emptySummary,
+  onSameNetwork,
   parseCandidate,
   type ConnectionDiagnostics,
 } from '../../src/client/transfer/diagnostics';
@@ -13,11 +14,13 @@ const host = (port: number, protocol = 'udp') =>
 const srflx = (address: string, port: number) =>
   `candidate:2 1 udp 1677729535 ${address} ${port} typ srflx raddr 0.0.0.0 rport 0 generation 0`;
 
-function summarize(lines: string[]) {
+function logOf(lines: string[]) {
   const log = new CandidateLog();
   for (const line of lines) log.add(line);
-  return log.summary();
+  return log;
 }
+
+const summarize = (lines: string[]) => logOf(lines).summary();
 
 describe('candidate parsing', () => {
   it('reads type, transport and address from SDP candidate attributes', () => {
@@ -68,6 +71,33 @@ describe('candidate summary', () => {
   });
 });
 
+describe('same network', () => {
+  it('recognises two devices behind one router by their shared public address', () => {
+    // A laptop and a phone on one home Wi-Fi behind a strict NAT: same address, other ports.
+    const laptop = logOf([host(5000), srflx('198.51.100.7', 5924), srflx('198.51.100.7', 5925)]);
+    const phone = logOf([host(6000), srflx('198.51.100.7', 7311)]);
+    expect(onSameNetwork(laptop, phone)).toBe(true);
+    expect(onSameNetwork(laptop, logOf([host(6000), srflx('203.0.113.9', 7311)]))).toBe(false);
+  });
+
+  it('compares IPv6 addresses by their /64 network, however they are written', () => {
+    const a = logOf([srflx('2001:db8:aa:1:2c4e:11ff:fe22:3344', 50000)]);
+    const b = logOf([srflx('2001:0db8:00aa:0001::7', 50002)]);
+    const elsewhere = logOf([srflx('2001:db8:aa:2::7', 50002)]);
+    expect(onSameNetwork(a, b)).toBe(true);
+    expect(onSameNetwork(a, elsewhere)).toBe(false);
+  });
+
+  it('ignores local and relay addresses, and needs public details from both sides', () => {
+    const relayOnly = logOf([
+      'candidate:3 1 udp 41885439 192.0.2.10 3478 typ relay raddr 0.0.0.0 rport 0 generation 0',
+    ]);
+    expect(onSameNetwork(relayOnly, relayOnly)).toBe(false);
+    expect(onSameNetwork(logOf([host(5000)]), logOf([host(5000)]))).toBe(false);
+    expect(onSameNetwork(logOf([srflx('198.51.100.7', 5924)]), new CandidateLog())).toBe(false);
+  });
+});
+
 describe('failure causes', () => {
   const base: ConnectionDiagnostics = {
     attempt: 0,
@@ -78,7 +108,19 @@ describe('failure causes', () => {
     iceStates: [],
     durationMs: 15_000,
     restarts: 0,
+    sameNetwork: false,
   };
+
+  it('says so when both devices are on one network that keeps them apart', () => {
+    expect(classifyFailure({ ...base, sameNetwork: true })).toBe('same-network-blocked');
+    // Without STUN there is no public address to compare, and silence stays silence.
+    expect(classifyFailure({ ...base, sameNetwork: true, stunServers: 0 })).toBe(
+      'same-network-only',
+    );
+    expect(classifyFailure({ ...base, sameNetwork: true, remote: emptySummary() })).toBe(
+      'no-remote-details',
+    );
+  });
 
   it('blames the configuration, the signaling, one network or their combination', () => {
     expect(classifyFailure(base)).toBe('incompatible-networks');

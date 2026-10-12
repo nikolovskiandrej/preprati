@@ -4,7 +4,10 @@
  * The signaling server only helps two browsers find each other and exchange
  * WebRTC session descriptions and ICE candidates. File contents never travel
  * over this channel — they flow over the RTCDataChannel (see
- * src/client/transfer/protocol.ts).
+ * src/client/transfer/protocol.ts), or, when the devices can't connect
+ * directly, through encrypted temporary storage ("relay mode", see
+ * src/client/transfer/relay.ts). Relay mode's control messages travel here,
+ * end-to-end encrypted: the server only sees opaque ciphertext.
  *
  * Every inbound message is validated with these schemas on the server; the
  * client validates server messages with the same schemas.
@@ -45,6 +48,17 @@ export const IceCandidateSchema = z.object({
  */
 const AttemptSchema = z.number().int().min(0).max(1_000);
 
+/** A raw P-256 public key (65 bytes), base64url without padding. */
+const RelayKeySchema = z.string().regex(/^[A-Za-z0-9_-]{87}$/);
+
+/** Ciphertext of one relay control message: base64url of IV ‖ AES-GCM ciphertext ‖ tag. */
+export const RELAY_MESSAGE_MAX_CHARS = 48_000;
+const RelayDataSchema = z
+  .string()
+  .min(39)
+  .max(RELAY_MESSAGE_MAX_CHARS)
+  .regex(/^[A-Za-z0-9_-]+$/);
+
 export const SignalPayloadSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('description'),
@@ -59,8 +73,26 @@ export const SignalPayloadSchema = z.discriminatedUnion('kind', [
   }),
   /** The answering device asks the offering device (the host) to start attempt `attempt`. */
   z.object({ kind: z.literal('retry'), attempt: AttemptSchema }),
+  /**
+   * Relay mode: the sending device proposes it with its half of an ECDH key
+   * agreement; the receiving device answers with its own half, naming the
+   * proposal it answers (`reply`: the sender's key).
+   */
+  z.object({
+    kind: z.literal('relay-hello'),
+    key: RelayKeySchema,
+    reply: RelayKeySchema.optional(),
+  }),
+  /** Relay mode: control message number `seq` from one device, encrypted end to end. */
+  z.object({
+    kind: z.literal('relay-message'),
+    seq: z.number().int().min(0).max(1_000_000),
+    data: RelayDataSchema,
+  }),
 ]);
 export type SignalPayload = z.infer<typeof SignalPayloadSchema>;
+/** The payloads of one WebRTC negotiation (what a peer connection sends and consumes). */
+export type NegotiationPayload = Extract<SignalPayload, { kind: 'description' | 'candidate' }>;
 
 export const JoinTargetSchema = z.discriminatedUnion('via', [
   z.object({ via: z.literal('link'), sessionId: z.string().regex(RANDOM_ID_PATTERN) }),

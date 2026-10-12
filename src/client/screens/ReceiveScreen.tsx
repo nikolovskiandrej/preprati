@@ -21,6 +21,7 @@ import {
   TransferDone,
   TransferProgress,
 } from '../features/quick/panels';
+import { useSessionWakeLock } from '../features/quick/wakeLock';
 import { useI18n } from '../i18n';
 import { DownloadIcon, RetryIcon } from '../icons';
 import { QuickSession, type QuickState } from '../transfer/quickSession';
@@ -34,6 +35,7 @@ export default function ReceiveScreen() {
   const { config } = useConfig();
   const phase = state?.phase ?? 'idle';
   useLeaveWarning(phase === 'transferring' || (state?.received.length ?? 0) > 0);
+  useSessionWakeLock(state);
 
   useEffect(() => {
     if (session && phase === 'idle') void session.host('receiver');
@@ -55,6 +57,7 @@ export default function ReceiveScreen() {
         node: (
           <QuickError
             view={error}
+            device={device}
             actions={
               <>
                 {retry ? (
@@ -96,7 +99,10 @@ export default function ReceiveScreen() {
           : { key: 'creating', node: <StatusBlock busy title={t('quick.creating')} /> };
       case 'peer-connected':
       case 'connecting':
-        return { key: 'connecting', node: <ConnectingStatus device={device} /> };
+        return {
+          key: state.route === 'server' ? 'connecting-server' : 'connecting',
+          node: <ConnectingStatus device={device} viaServer={state.route === 'server'} />,
+        };
       case 'connected':
         return {
           key: 'connected',

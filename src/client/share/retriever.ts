@@ -59,6 +59,16 @@ export interface RecipientFile {
   error: RetrieverErrorCode | null;
 }
 
+/** A decrypted, verified file (see `fetchFiles`). */
+export interface RetrievedFile {
+  index: number;
+  name: string;
+  type: string;
+  size: number;
+  lastModified: number;
+  blob: Blob;
+}
+
 export interface RetrieverState {
   phase: RetrieverPhase;
   expiresAt: number | null;
@@ -161,7 +171,7 @@ export class ShareRetriever {
       });
     } catch (error) {
       if (this.disposed) return;
-      this.update({ phase: 'failed', error: toRetrieverError(error) });
+      this.update({ phase: 'failed', error: retrieverErrorOf(error) });
     }
   }
 
@@ -176,7 +186,7 @@ export class ShareRetriever {
       this.patchFile(index, { status: 'saved', progress: 1 });
     } catch (error) {
       if (this.disposed) return;
-      this.patchFile(index, { status: 'failed', progress: 0, error: toRetrieverError(error) });
+      this.patchFile(index, { status: 'failed', progress: 0, error: retrieverErrorOf(error) });
     }
   }
 
@@ -201,8 +211,38 @@ export class ShareRetriever {
       this.update({ zip: { status: 'saved', progress: 1, error: null } });
     } catch (error) {
       if (this.disposed) return;
-      this.update({ zip: { status: 'failed', progress: 0, error: toRetrieverError(error) } });
+      this.update({ zip: { status: 'failed', progress: 0, error: retrieverErrorOf(error) } });
     }
+  }
+
+  /**
+   * Decrypts and verifies every file, in order, without saving anything — for
+   * callers with their own received-files list (Quick Transfer's relay mode).
+   * `onProgress` gets the plaintext bytes done so far. Throws on any failure;
+   * `retrieverErrorOf` turns the error into a RetrieverErrorCode.
+   */
+  async fetchFiles(
+    onProgress: (doneBytes: number) => void = () => undefined,
+  ): Promise<RetrievedFile[]> {
+    if (this.state.phase !== 'ready-to-download') throw new Error('Package not loaded');
+    const files: RetrievedFile[] = [];
+    let done = 0;
+    for (const file of this.state.files) {
+      const blob = await this.decryptFile(file.index, (fraction) =>
+        onProgress(done + fraction * file.size),
+      );
+      done += file.size;
+      onProgress(done);
+      files.push({
+        index: file.index,
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        lastModified: file.lastModified,
+        blob,
+      });
+    }
+    return files;
   }
 
   /** Decrypts files one after another for the zip stream, reporting cumulative bytes. */
@@ -325,7 +365,7 @@ export class ShareRetriever {
 class KeyMismatch extends Error {}
 class CorruptPackage extends Error {}
 
-function toRetrieverError(error: unknown): RetrieverErrorCode {
+export function retrieverErrorOf(error: unknown): RetrieverErrorCode {
   if (error instanceof KeyMismatch) return 'invalid-key';
   if (error instanceof CorruptPackage || error instanceof DecryptionError) return 'corrupted';
   if (error instanceof HttpError) {

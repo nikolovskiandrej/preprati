@@ -10,8 +10,12 @@
  *   flaky network is therefore delivered again, and duplicates from
  *   overlapping requests are skipped: every message is handled once, in order.
  * - The inbox is polled every 400 ms while messages are flowing; otherwise at
- *   the pace QuickSession sets: 1.5 s while pairing, 5 s after a failed
- *   attempt, 15 s once the devices talk directly (presence only).
+ *   the pace QuickSession sets: 1.5 s while pairing, a steady 1 s during a
+ *   relay-mode transfer (its progress messages would otherwise keep the fast
+ *   pace going for minutes), 5 s after a failed attempt, 15 s once the
+ *   devices talk directly (presence only).
+ * - A page that comes back to the foreground checks right away: phones pause
+ *   timers in the background.
  * - Closing the page sends a `sendBeacon` disconnect so the other device
  *   learns right away; otherwise the server notices after a few minutes.
  */
@@ -27,6 +31,7 @@ const ACTIVE_INTERVAL_MS = 400;
 const ACTIVE_WINDOW_MS = 6000;
 const PACE_INTERVAL_MS: Record<SignalingPace, number> = {
   normal: 1500,
+  live: 1000,
   standby: 5000,
   quiet: 15_000,
 };
@@ -81,6 +86,7 @@ export class HttpSignalingClient implements SignalingTransport {
     }
     this.lastActivity = Date.now();
     window.addEventListener('pagehide', this.handlePageHide);
+    document.addEventListener('visibilitychange', this.handleVisibility);
     this.schedulePoll(0);
   }
 
@@ -158,7 +164,8 @@ export class HttpSignalingClient implements SignalingTransport {
 
   private nextInterval(): number {
     if (this.failures > 0) return Math.min(10_000, 500 * 2 ** this.failures);
-    if (Date.now() - this.lastActivity < ACTIVE_WINDOW_MS) return ACTIVE_INTERVAL_MS;
+    if (this.pace !== 'live' && Date.now() - this.lastActivity < ACTIVE_WINDOW_MS)
+      return ACTIVE_INTERVAL_MS;
     return PACE_INTERVAL_MS[this.pace];
   }
 
@@ -238,6 +245,11 @@ export class HttpSignalingClient implements SignalingTransport {
 
   private readonly handlePageHide = () => this.beaconDisconnect();
 
+  /** Back in the foreground: whatever arrived while timers were paused is fetched at once. */
+  private readonly handleVisibility = () => {
+    if (document.visibilityState === 'visible' && !this.polling) this.schedulePoll(0);
+  };
+
   private beaconDisconnect(): void {
     if (!this.credentials) return;
     const payload = JSON.stringify(this.credentials);
@@ -261,6 +273,7 @@ export class HttpSignalingClient implements SignalingTransport {
     if (this.pollTimer) clearTimeout(this.pollTimer);
     this.pollTimer = null;
     window.removeEventListener('pagehide', this.handlePageHide);
+    document.removeEventListener('visibilitychange', this.handleVisibility);
   }
 
   private finish(reason: SignalingCloseReason): void {

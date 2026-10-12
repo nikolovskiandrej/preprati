@@ -384,6 +384,42 @@ describe('PollingSignaling', () => {
     expect(() => parse({ kind: 'candidate', candidate: null, attempt: -1 })).toThrow();
   });
 
+  it('relays relay-mode messages as opaque ciphertext, and only well-formed ones', async () => {
+    const { host, created } = await hostSession('sender');
+    const guest = await device();
+    await guest.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Phone'),
+    });
+    await guest.poll();
+    await host.poll();
+    const parse = (payload: unknown) =>
+      ClientMessageSchema.parse({ type: 'signal', payload }) as Extract<
+        ClientMessage,
+        { type: 'signal' }
+      >;
+    const key = 'B'.repeat(87);
+    const hello = parse({ kind: 'relay-hello', key });
+    const answer = parse({ kind: 'relay-hello', key: 'C'.repeat(87), reply: key });
+    const message = parse({ kind: 'relay-message', seq: 0, data: 'D'.repeat(120) });
+    await host.send(hello);
+    await host.send(message);
+    await guest.send(answer);
+    expect(await guest.poll()).toEqual([
+      { type: 'signal', payload: hello.payload },
+      { type: 'signal', payload: message.payload },
+    ]);
+    expect(await host.poll()).toEqual([{ type: 'signal', payload: answer.payload }]);
+
+    expect(() => parse({ kind: 'relay-hello', key: 'short' })).toThrow();
+    expect(() =>
+      parse({ kind: 'relay-message', seq: 0, data: 'not base64url!'.repeat(4) }),
+    ).toThrow();
+    expect(() => parse({ kind: 'relay-message', seq: 0, data: 'D'.repeat(48_001) })).toThrow();
+    expect(() => parse({ kind: 'relay-message', seq: -1, data: 'D'.repeat(120) })).toThrow();
+  });
+
   it('claims each message number only once', async () => {
     const client = await device();
     expect(await signaling.claimSequence(client.connectionId, 1)).toBe(true);

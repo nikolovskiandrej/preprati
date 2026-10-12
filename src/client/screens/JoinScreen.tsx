@@ -23,16 +23,19 @@ import {
   QuickError,
   ReceivedFilesList,
   ReconnectingNotice,
+  RelayNote,
   StatusBlock,
   TransferDone,
   TransferProgress,
 } from '../features/quick/panels';
+import { useSessionWakeLock } from '../features/quick/wakeLock';
 import { SelectedFilesPane } from '../features/common/SelectedFilesPane';
 import { useI18n } from '../i18n';
-import { DownloadIcon, ErrorIcon, LinkIcon, RetryIcon, SendIcon } from '../icons';
+import { DownloadIcon, ErrorIcon, LinkIcon, LockIcon, RetryIcon, SendIcon } from '../icons';
 import { localFileId, type SelectedFile } from '../lib/files';
 import { handOffFiles } from '../lib/handoff';
 import { QuickSession, type QuickState } from '../transfer/quickSession';
+import { relayLimitProblem } from '../transfer/relay';
 import { Button } from '../ui/Button';
 import styles from './QuickScreens.module.css';
 
@@ -63,6 +66,7 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
       phase === 'awaiting-acceptance' ||
       (state?.received.length ?? 0) > 0,
   );
+  useSessionWakeLock(state);
 
   useEffect(() => {
     if (session && target && phase === 'idle') void session.join(target);
@@ -72,6 +76,12 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
     if (!session) return;
     session.setFiles(files.map((entry) => entry.file));
     if (session.send()) setComposing(false);
+  };
+  /** The devices can't connect directly: send the chosen files through preprati. instead. */
+  const sendThroughServer = () => {
+    if (!session) return;
+    session.setFiles(files.map((entry) => entry.file));
+    session.useRelay();
   };
 
   if (!target) {
@@ -101,11 +111,19 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
     if (!state || !session || phase === 'idle' || phase === 'joining') {
       return { key: 'joining', node: <StatusBlock busy title={t('join.joining')} /> };
     }
+    const selected = files.map((entry) => entry.file);
+    const relayFits =
+      !!state.relay &&
+      selected.length > 0 &&
+      relayLimitProblem(selected, state.relay.limits) === null;
     const error = describeQuickError(state, { shareAvailable });
     if (error) {
       const retry = error.connection?.canRetry === true;
+      const canRelay = error.connection?.canRelay === true;
+      // A sender who hasn't chosen files yet sees the button disabled until they do.
+      const offerRelay = canRelay && (relayFits || selected.length === 0);
       const offerLink =
-        !!error.connection && shareAvailable && role === 'sender' && files.length > 0;
+        !!error.connection && !canRelay && shareAvailable && role === 'sender' && files.length > 0;
       const actions =
         error.recovery === 'retry-send' ? (
           <Button variant="primary" onClick={sendNow} disabled={files.length === 0}>
@@ -113,8 +131,22 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
           </Button>
         ) : (
           <>
+            {offerRelay ? (
+              <Button
+                variant="primary"
+                icon={LockIcon}
+                onClick={sendThroughServer}
+                disabled={!relayFits}
+              >
+                {t('quick.relaySend')}
+              </Button>
+            ) : null}
             {retry ? (
-              <Button variant="primary" icon={RetryIcon} onClick={() => session.retryConnection()}>
+              <Button
+                variant={offerRelay ? 'inverse' : 'primary'}
+                icon={RetryIcon}
+                onClick={() => session.retryConnection()}
+              >
                 {t('quick.tryAgain')}
               </Button>
             ) : null}
@@ -136,7 +168,7 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
               </Button>
             ) : (
               <Button
-                variant={retry || offerLink ? 'ghost' : 'inverse'}
+                variant={retry || offerLink || offerRelay ? 'ghost' : 'inverse'}
                 onClick={() => navigate('/')}
               >
                 {t('common.goHome')}
@@ -144,9 +176,13 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
             )}
           </>
         );
+      const note =
+        canRelay && state.relay ? (
+          <RelayNote device={device} relay={state.relay} files={selected} />
+        ) : null;
       return {
-        key: `error-${error.message}-${retry}`,
-        node: <QuickError view={error} actions={actions} />,
+        key: `error-${error.message}-${retry}-${offerRelay}`,
+        node: <QuickError view={error} device={device} actions={actions} note={note} />,
       };
     }
 
@@ -192,7 +228,22 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
         };
       case 'peer-connected':
       case 'connecting':
-        return { key: 'connecting', node: <ConnectingStatus device={device} /> };
+        return {
+          key: state.route === 'server' ? 'connecting-server' : 'connecting',
+          node: (
+            <ConnectingStatus
+              device={device}
+              viaServer={state.route === 'server'}
+              slowAction={
+                role === 'sender' && state.canRelay && relayFits ? (
+                  <Button variant="inverse" icon={LockIcon} onClick={sendThroughServer}>
+                    {t('quick.relaySendInstead')}
+                  </Button>
+                ) : null
+              }
+            />
+          ),
+        };
       case 'connected':
         return role === 'sender'
           ? { key: 'compose', node: sendPanel }

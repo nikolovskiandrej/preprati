@@ -46,6 +46,13 @@ export interface ConnectionDiagnostics {
   durationMs: number;
   /** ICE restarts after the connection dropped. */
   restarts: number;
+  /**
+   * Both devices reported the same public address: they sit behind one router
+   * (the same home or office network). A failure then means that network keeps
+   * them apart (client isolation, blocked local discovery, a VPN), not that two
+   * different networks are incompatible.
+   */
+  sameNetwork: boolean;
 }
 
 /** Why a connection attempt failed, in terms the interface can explain. */
@@ -54,6 +61,8 @@ export type FailureCause =
   | 'same-network-only'
   /** Nothing arrived from the other device. */
   | 'no-remote-details'
+  /** Both devices are on one network, but it doesn't let them reach each other. */
+  | 'same-network-blocked'
   /** This device found no public route (its network or a privacy setting blocks it). */
   | 'local-network'
   /** The other device found no public route. */
@@ -85,6 +94,21 @@ export class CandidateLog {
     return this.candidates.length;
   }
 
+  /**
+   * The public networks this side showed up from: each IPv4 address seen by a
+   * STUN server, and the /64 prefix of each public IPv6 address (devices on
+   * one IPv6 network share it while their own addresses differ).
+   */
+  publicNetworks(): Set<string> {
+    const networks = new Set<string>();
+    for (const candidate of this.candidates) {
+      if (candidate.type !== 'srflx') continue;
+      const network = networkOf(candidate.address);
+      if (network) networks.add(network);
+    }
+    return networks;
+  }
+
   summary(): CandidateSummary {
     const count = (type: CandidateType) => this.candidates.filter((c) => c.type === type).length;
     const udp = this.candidates.filter((c) => c.protocol === 'udp');
@@ -108,11 +132,41 @@ export function emptySummary(): CandidateSummary {
   return { host: 0, srflx: 0, relay: 0, strictNat: false };
 }
 
+/** True when both sides showed up from a common public network (see `publicNetworks`). */
+export function onSameNetwork(local: CandidateLog, remote: CandidateLog): boolean {
+  const theirs = remote.publicNetworks();
+  for (const network of local.publicNetworks()) if (theirs.has(network)) return true;
+  return false;
+}
+
+/** "203.0.113.7" → itself; "2001:db8:a:b:1:2:3:4" → "2001:db8:a:b::/64"; anything else → null. */
+function networkOf(address: string): string | null {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) return address;
+  if (!address.includes(':')) return null;
+  const bare = address
+    .replace(/^\[|\]$/g, '')
+    .replace(/%.*$/, '')
+    .toLowerCase();
+  const [head = '', tail, ...rest] = bare.split('::');
+  if (rest.length > 0) return null;
+  const left = head ? head.split(':') : [];
+  const right = tail ? tail.split(':') : [];
+  const missing = 8 - left.length - right.length;
+  if (missing < 0 || (tail === undefined && missing !== 0)) return null;
+  const groups = [...left, ...Array<string>(missing).fill('0'), ...right];
+  if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return null;
+  return `${groups
+    .slice(0, 4)
+    .map((group) => group.replace(/^0+(?=.)/, ''))
+    .join(':')}::/64`;
+}
+
 /** Explains a failed attempt from what both sides gathered. */
 export function classifyFailure(diagnostics: ConnectionDiagnostics): FailureCause {
   const { local, remote } = diagnostics;
   if (diagnostics.stunServers === 0 && diagnostics.turnServers === 0) return 'same-network-only';
   if (remote.host + remote.srflx + remote.relay === 0) return 'no-remote-details';
+  if (diagnostics.sameNetwork) return 'same-network-blocked';
   if (local.srflx + local.relay === 0) return 'local-network';
   if (remote.srflx + remote.relay === 0) return 'remote-network';
   return 'incompatible-networks';

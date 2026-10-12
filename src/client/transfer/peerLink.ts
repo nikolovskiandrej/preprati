@@ -14,11 +14,16 @@
  * channel, and any transfer on it, stays open. Restarts are limited per drop
  * and bounded by `reconnectWindowMs`; after that the connection counts as lost.
  */
-import type { IceServerConfig, SignalPayload } from '../../shared/signaling';
-import { CandidateLog, type ConnectionDiagnostics } from './diagnostics';
+import type { IceServerConfig, NegotiationPayload, SignalPayload } from '../../shared/signaling';
+import { CandidateLog, onSameNetwork, type ConnectionDiagnostics } from './diagnostics';
 import { countIceServers, toRtcIceServers } from './iceConfig';
 
-export type ConnectionRoute = 'direct' | 'relay' | 'unknown';
+/**
+ * How the devices are connected: `direct`, through a TURN `relay`, or — in
+ * relay mode, without any WebRTC connection — through preprati.'s `server`
+ * (encrypted temporary storage; see ./relay.ts).
+ */
+export type ConnectionRoute = 'direct' | 'relay' | 'server' | 'unknown';
 export type PeerFailure = 'ice-failed' | 'timeout';
 
 export interface PeerLinkOptions {
@@ -26,7 +31,7 @@ export interface PeerLinkOptions {
   isOfferer: boolean;
   /** Connection attempt this link belongs to; every outgoing signal carries it. */
   attempt?: number;
-  sendSignal: (payload: SignalPayload) => void;
+  sendSignal: (payload: NegotiationPayload) => void;
   onOpen: () => void;
   /** The connection never came up. */
   onFailed: (reason: PeerFailure, diagnostics: ConnectionDiagnostics) => void;
@@ -46,6 +51,12 @@ export interface PeerLinkOptions {
 /** ICE restarts per drop: one right away, one more if the first doesn't bring the path back. */
 const MAX_RESTARTS_PER_DROP = 2;
 const RESTART_RETRY_MS = 8_000;
+/**
+ * How long a dropped connection may take to come back. Generous on purpose:
+ * a phone that briefly locks its screen or switches networks pauses the page,
+ * and its transfer should survive that.
+ */
+const RECONNECT_WINDOW_MS = 45_000;
 
 type TimerName = 'connect' | 'grace' | 'reconnect' | 'restart';
 
@@ -146,6 +157,21 @@ export class PeerLink {
     return this.opened && !this.closed;
   }
 
+  /**
+   * The page is in the foreground again. Phones pause background pages, so a
+   * path that dropped meanwhile is repaired right away instead of after the
+   * usual delays (one more restart is allowed even if the earlier ones ran out).
+   */
+  resume(): void {
+    if (this.closed || !this.opened) return;
+    const ice = this.pc.iceConnectionState;
+    if (ice !== 'disconnected' && ice !== 'failed') return;
+    this.beginReconnect();
+    if (!this.options.isOfferer) return;
+    this.restartsThisDrop = Math.min(this.restartsThisDrop, MAX_RESTARTS_PER_DROP - 1);
+    this.restartIce();
+  }
+
   /** What this attempt learned about both networks so far (no addresses). */
   diagnostics(): ConnectionDiagnostics {
     return {
@@ -157,12 +183,13 @@ export class PeerLink {
       iceStates: [...this.iceStates],
       durationMs: Date.now() - this.startedAt,
       restarts: this.restarts,
+      sameNetwork: onSameNetwork(this.localCandidates, this.remoteCandidates),
     };
   }
 
   private async applySignal(payload: SignalPayload): Promise<void> {
     if (this.closed) return;
-    if (payload.kind === 'retry') return; // handled by the session
+    if (payload.kind !== 'description' && payload.kind !== 'candidate') return; // the session's
     if (payload.kind === 'description') {
       const { description } = payload;
       if (description.type === 'offer' && this.options.isOfferer) return; // never expected
@@ -209,7 +236,7 @@ export class PeerLink {
     });
   }
 
-  private signal(payload: SignalPayload): void {
+  private signal(payload: NegotiationPayload): void {
     this.options.sendSignal({ ...payload, attempt: this.attempt });
   }
 
@@ -299,7 +326,9 @@ export class PeerLink {
     this.reconnecting = true;
     this.restartsThisDrop = 0;
     this.options.onReconnecting?.(true);
-    this.setTimer('reconnect', this.options.reconnectWindowMs ?? 25_000, () => this.fail('lost'));
+    this.setTimer('reconnect', this.options.reconnectWindowMs ?? RECONNECT_WINDOW_MS, () =>
+      this.fail('lost'),
+    );
     if (this.options.isOfferer) {
       this.setTimer('restart', this.options.restartDelayMs ?? 2_500, () => this.restartIce());
     }

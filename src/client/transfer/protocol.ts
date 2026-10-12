@@ -30,7 +30,8 @@ export const MAX_FRAME_BYTES = 64 * 1024;
 export const MAX_FILES_PER_TRANSFER = 1000;
 export const MAX_FILE_NAME_LENGTH = 1024;
 
-const TransferId = z.string().regex(/^[A-Za-z0-9_-]{8,32}$/);
+export const TransferIdSchema = z.string().regex(/^[A-Za-z0-9_-]{8,32}$/);
+const TransferId = TransferIdSchema;
 
 export const OfferedFileSchema = z.object({
   index: z
@@ -107,14 +108,16 @@ export function decodeControl(text: string): ControlMessage | null {
   const parsed = ControlMessageSchema.safeParse(json);
   if (!parsed.success) return null;
   const message = parsed.data;
-  if (message.t === 'offer') {
-    // Indices must be 0..n-1 in order and the declared total must match.
-    const consistent =
-      message.files.every((file, i) => file.index === i) &&
-      message.files.reduce((sum, file) => sum + file.size, 0) === message.totalBytes;
-    if (!consistent) return null;
-  }
+  if (message.t === 'offer' && !isConsistentOffer(message.files, message.totalBytes)) return null;
   return message;
+}
+
+/** An offer's files must be numbered 0..n-1 in order, and their sizes must add up to the total. */
+export function isConsistentOffer(files: OfferedFile[], totalBytes: number): boolean {
+  return (
+    files.every((file, i) => file.index === i) &&
+    files.reduce((sum, file) => sum + file.size, 0) === totalBytes
+  );
 }
 
 export interface ChunkFrame {
