@@ -79,6 +79,17 @@ Then:
 
 While connecting, the status changes after 8 s to "Still trying… Devices on different networks can take up to half a minute." If an established connection drops, both devices show "Connection interrupted. Reconnecting…" while ICE restarts (up to two restarts within 25 s). After that the connection counts as lost.
 
+### When your own network is the strict one
+
+If "Connection details" says **"Public address found (strict NAT)"** for _this device_, or `npm run nat-check` reports a strict NAT, your network picks a new public port for every destination. It can then connect directly only to fairly open networks, which is the classic "works only on the same Wi-Fi" symptom. Things to try that cost nothing:
+
+1. **Router settings.** Look for a NAT option such as "NAT type", "full cone NAT", "endpoint-independent mapping", or a gaming/NAT-boost mode, and turn it on. Then run `npm run nat-check` again.
+2. **Find out who does the NAT.** Compare the router's WAN/Internet address (on its admin page) with the public address the check reports. If the WAN address is in 100.64.0.0–100.127.255.255, or another private range, your provider uses carrier-grade NAT, and router settings won't help. Ask the provider whether it offers a public IPv4 address or IPv6.
+3. **IPv6.** If your provider supports it, enable IPv6 on the router. Devices that both have IPv6 connect without any NAT.
+4. Otherwise use **Send as a link instead**, or a relay (§6).
+
+`npm run nat-check` asks two STUN servers from one socket which public port they see, then tries IPv6. It needs only Node.
+
 ## 5. Free STUN servers
 
 STUN only tells a device its public address. It never carries file data, and it can't connect networks that forbid direct paths.

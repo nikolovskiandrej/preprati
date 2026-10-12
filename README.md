@@ -65,6 +65,7 @@ The repository also deploys to **Vercel** as a serverless profile of the same ap
 | `npm test`             | Vitest unit + integration suites                                                       |
 | `npm run test:e2e`     | Builds, then Playwright end-to-end tests in Chrome against the production build        |
 | `npm run check`        | lint + typecheck + test + build                                                        |
+| `npm run nat-check`    | Tells whether this computer's network allows direct connections across networks        |
 
 Optional cross-network tests: two NATed networks in Docker, the real app in real Chrome (Linux, Docker, Chrome; [details](docs/CONNECTIVITY.md#8-testing-across-networks)):
 
