@@ -18,7 +18,10 @@ const fake = vi.hoisted(() => {
   const BlobNotFoundError = Mangled;
   const blobs = new Map<string, { data: Buffer; uploadedAt: Date }>();
   const calls: Array<{ op: string; options?: Record<string, unknown> }> = [];
-  return { BlobNotFoundError, blobs, calls };
+  // Like the Blob CDN: unless asked for `identity`, larger blobs come back
+  // compressed and chunked, so the SDK reports size 0.
+  const state = { ignoreIdentity: false };
+  return { BlobNotFoundError, blobs, calls, state };
 });
 
 vi.mock('@vercel/blob', () => ({
@@ -40,7 +43,15 @@ vi.mock('@vercel/blob', () => ({
           controller.close();
         },
       }),
-      blob: { size: blob.data.length, pathname },
+      blob: {
+        size:
+          !fake.state.ignoreIdentity &&
+          (options.headers as Record<string, string> | undefined)?.['accept-encoding'] ===
+            'identity'
+            ? blob.data.length
+            : 0,
+        pathname,
+      },
     };
   },
   async head(pathname: string) {
@@ -138,6 +149,7 @@ describe('serverless storage (Vercel Blob + KV)', () => {
     kv = new MemoryKv(() => now);
     fake.blobs.clear();
     fake.calls.length = 0;
+    fake.state.ignoreIdentity = false;
   });
 
   it('keeps ciphertext in private blobs and metadata in KV', async () => {
@@ -185,6 +197,35 @@ describe('serverless storage (Vercel Blob + KV)', () => {
     await reader.settle(); // expiry noticed on read deletes the data right away
     expect(fake.blobs.size).toBe(0);
     await expect(writer.getInfo(id)).rejects.toMatchObject({ code: 'expired' });
+  });
+
+  it('serves exact sizes, asking for uncompressed data and never trusting a missing length', async () => {
+    const service = makeService();
+    const { id, ownerToken } = await upload(service);
+    await service.finalize(id, ownerToken);
+
+    const chunk = await service.openChunk(id, 0);
+    chunk.stream.destroy();
+    expect(chunk.size).toBe(CHUNK + SHARE_CHUNK_OVERHEAD);
+    expect(fake.calls.filter((call) => call.op === 'get').at(-1)?.options).toMatchObject({
+      headers: { 'accept-encoding': 'identity' },
+    });
+
+    // Even if the store streams without a length (size 0), the layout gives the exact size.
+    fake.state.ignoreIdentity = true;
+    const manifest = await service.openManifest(id);
+    manifest.stream.destroy();
+    expect(manifest.size).toBe(540);
+    const last = await service.openChunk(id, 1);
+    last.stream.destroy();
+    expect(last.size).toBe(100 + SHARE_CHUNK_OVERHEAD);
+    await service.settle();
+
+    // A stored object whose known size is wrong is refused rather than served.
+    fake.state.ignoreIdentity = false;
+    const key = [...fake.blobs.keys()].find((name) => name.endsWith('chunks/0000001.bin'))!;
+    fake.blobs.set(key, { data: Buffer.alloc(10), uploadedAt: new Date() });
+    await expect(service.openChunk(id, 1)).rejects.toMatchObject({ code: 'storage-unavailable' });
   });
 
   it('owner deletion removes data immediately and frees capacity', async () => {

@@ -415,18 +415,35 @@ export class ShareService {
     const meta = await this.requireReadable(id);
     const object = await this.storeOpen(`${storagePrefixFor(id)}data/manifest.bin`);
     if (!object) throw new ShareServiceError('not-found', 404, 'Share data is unavailable');
+    const size = this.checkedSize(object, meta.manifestBytes);
     this.background(this.recordAccess(meta.id));
-    return object;
+    return { stream: object.stream, size };
   }
 
   async openChunk(id: string, index: number): Promise<{ stream: Readable; size: number }> {
     const meta = await this.requireReadable(id);
-    if (expectedChunkCipherSize(index, meta) === null) {
+    const expected = expectedChunkCipherSize(index, meta);
+    if (expected === null) {
       throw new ShareServiceError('not-found', 404, 'Chunk not found');
     }
     const object = await this.storeOpen(chunkKey(storagePrefixFor(id), index));
     if (!object) throw new ShareServiceError('not-found', 404, 'Share data is unavailable');
-    return object;
+    return { stream: object.stream, size: this.checkedSize(object, expected) };
+  }
+
+  /**
+   * The exact size comes from the package layout, not the store: some stores
+   * stream without a length (a CDN may serve a blob compressed and chunked)
+   * and report 0. A different known size means the stored object is damaged.
+   */
+  private checkedSize(object: { stream: Readable; size: number }, expected: number): number {
+    if (object.size > 0 && object.size !== expected) {
+      object.stream.destroy();
+      throw this.storageFailure(
+        new Error(`stored object is ${object.size} bytes, expected ${expected}`),
+      );
+    }
+    return expected;
   }
 
   /* ------------------------------------------------------------------------ */

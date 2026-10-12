@@ -123,6 +123,9 @@ export class VercelBlobStore implements BlobStore {
         ...this.auth(),
         access: 'private',
         useCache,
+        // Ciphertext doesn't compress; without this the CDN serves larger blobs
+        // Brotli-encoded and chunked, with no length.
+        headers: { 'accept-encoding': 'identity' },
       });
       if (!result || result.statusCode !== 200 || !result.stream) return null;
       return {
