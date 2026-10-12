@@ -52,7 +52,7 @@ export class VercelBlobStore implements BlobStore {
       await sdk.head(`${this.prefix}__health__.txt`, this.auth());
       ok = true;
     } catch (error) {
-      ok = isNotFound(error); // reaching the store and getting "not found" means it works
+      ok = this.isNotFound(error); // reaching the store and getting "not found" means it works
     }
     this.lastHealth = { at: this.now(), ok };
     return ok;
@@ -69,7 +69,8 @@ export class VercelBlobStore implements BlobStore {
           this.auth(),
         );
       } catch (error) {
-        if (!isNotFound(error)) throw new StorageError('Failed to delete blobs', { cause: error });
+        if (!this.isNotFound(error))
+          throw new StorageError('Failed to delete blobs', { cause: error });
       }
     }
   }
@@ -129,7 +130,7 @@ export class VercelBlobStore implements BlobStore {
         size: result.blob.size,
       };
     } catch (error) {
-      if (isNotFound(error)) return null;
+      if (this.isNotFound(error)) return null;
       throw new StorageError('Failed to read blob', { cause: error });
     }
   }
@@ -141,7 +142,7 @@ export class VercelBlobStore implements BlobStore {
       const info = await sdk.head(this.prefix + key, this.auth());
       return { key, size: info.size, modifiedAt: info.uploadedAt.getTime() };
     } catch (error) {
-      if (isNotFound(error)) return null;
+      if (this.isNotFound(error)) return null;
       throw new StorageError('Failed to stat blob', { cause: error });
     }
   }
@@ -152,7 +153,7 @@ export class VercelBlobStore implements BlobStore {
     try {
       await sdk.del(this.prefix + key, this.auth());
     } catch (error) {
-      if (isNotFound(error)) return;
+      if (this.isNotFound(error)) return;
       throw new StorageError('Failed to delete blob', { cause: error });
     }
   }
@@ -229,6 +230,12 @@ export class VercelBlobStore implements BlobStore {
     } while (cursor);
   }
 
+  /** Uses the SDK's own error class: class names don't survive minified bundles. */
+  private isNotFound(error: unknown): boolean {
+    if (this.sdk && error instanceof this.sdk.BlobNotFoundError) return true;
+    return (error as { name?: string } | null)?.name === 'BlobNotFoundError';
+  }
+
   private auth(): { token?: string } {
     return this.options.token ? { token: this.options.token } : {};
   }
@@ -251,10 +258,4 @@ export class VercelBlobStore implements BlobStore {
     }
     return this.sdk;
   }
-}
-
-function isNotFound(error: unknown): boolean {
-  const name = (error as { name?: string; constructor?: { name?: string } } | null)?.constructor
-    ?.name;
-  return name === 'BlobNotFoundError' || (error as { name?: string })?.name === 'BlobNotFoundError';
 }

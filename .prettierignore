@@ -6,3 +6,6 @@ test-results
 .vercel
 package-lock.json
 *.png
+.agents
+.claude
+skills-lock.json

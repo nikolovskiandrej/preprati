@@ -12,3 +12,7 @@ playwright-report
 blob-report
 *.log
 /*.png
+# Local agent tooling
+.agents
+.claude
+skills-lock.json

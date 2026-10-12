@@ -12,15 +12,17 @@ import { VercelBlobStore } from '../../src/server/storage/vercelBlobStore';
 import { SHARE_CHUNK_OVERHEAD } from '../../src/shared/constants';
 
 const fake = vi.hoisted(() => {
-  class BlobNotFoundError extends Error {
-    override name = 'BlobNotFoundError';
-  }
+  // Like the real SDK in a minified bundle: `name` stays "Error" and the class
+  // name is mangled, so only `instanceof` against the SDK's export works.
+  class Mangled extends Error {}
+  const BlobNotFoundError = Mangled;
   const blobs = new Map<string, { data: Buffer; uploadedAt: Date }>();
   const calls: Array<{ op: string; options?: Record<string, unknown> }> = [];
   return { BlobNotFoundError, blobs, calls };
 });
 
 vi.mock('@vercel/blob', () => ({
+  BlobNotFoundError: fake.BlobNotFoundError,
   async put(pathname: string, body: Buffer, options: Record<string, unknown>) {
     fake.calls.push({ op: 'put', options });
     fake.blobs.set(pathname, { data: Buffer.from(body), uploadedAt: new Date() });

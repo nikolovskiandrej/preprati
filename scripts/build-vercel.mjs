@@ -48,6 +48,8 @@ await build({
     ].join('\n'),
   },
   minify: true,
+  // Error classes are matched by name in some libraries; keep names intact.
+  keepNames: true,
   sourcemap: false,
   legalComments: 'none',
   logLevel: 'info',
