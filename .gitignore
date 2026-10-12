@@ -5,9 +5,8 @@ coverage/
 playwright-report/
 test-results/
 blob-report/
-.env
-.env.*.local
-.env.local
+.env*
+!.env.example
 *.log
 .DS_Store
 .vite/
