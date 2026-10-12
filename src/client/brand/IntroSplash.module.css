@@ -1,0 +1,32 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
+.lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--text);
+}
+
+.mark {
+  width: clamp(64px, 18vw, 84px);
+  height: clamp(64px, 18vw, 84px);
+  overflow: visible;
+  transform: translateY(-6%);
+}
+
+.word {
+  display: inline-block;
+  line-height: 0;
+}
+
+.wordmark {
+  width: auto;
+  height: clamp(38px, 11vw, 52px);
+}

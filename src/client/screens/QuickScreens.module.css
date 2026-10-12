@@ -1,0 +1,147 @@
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+
+@media (min-width: 900px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr);
+    gap: var(--space-8);
+  }
+}
+
+/* Receive: live pane first on phones (the QR is the point of the page). */
+.receive {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+
+@media (min-width: 900px) {
+  .receive {
+    grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
+    gap: var(--space-8);
+  }
+}
+
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.steps {
+  --icon-accent: var(--accent-ink);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  counter-reset: step;
+}
+
+.steps li {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+  font-size: var(--text-md);
+  color: var(--text-muted);
+}
+
+.steps li::before {
+  counter-increment: step;
+  content: counter(step);
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-weight: 800;
+  font-size: var(--text-sm);
+}
+
+.steps strong {
+  color: var(--text);
+}
+
+.single {
+  max-width: 40rem;
+}
+
+.liveButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.liveButtons > * {
+  flex: 1 1 11rem;
+}
+
+.pickerOnDark {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.sideTitle {
+  font-size: var(--text-xl);
+}
+
+.liveNote {
+  font-size: var(--text-sm);
+  color: var(--quick-muted);
+}
+
+.below {
+  margin-top: var(--space-6);
+}
+
+.codeCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 30rem;
+}
+
+.codeInput {
+  width: 100%;
+  min-height: 64px;
+  padding: 0 1rem;
+  border: 1.5px solid var(--line-strong);
+  border-radius: var(--radius-input);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+
+.codeInput::placeholder {
+  font-size: var(--text-lg);
+  letter-spacing: 0.02em;
+  text-transform: none;
+  font-weight: 600;
+  color: var(--text-subtle);
+}
+
+.codeInput[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+.fieldError {
+  color: var(--danger);
+  font-weight: 600;
+  font-size: var(--text-sm);
+}

@@ -1,0 +1,296 @@
+.live {
+  container: live / inline-size;
+  --icon-accent: var(--tangerine);
+  --focus: #fdba74;
+  --text: var(--quick-text);
+  --text-muted: var(--quick-muted);
+  --line: var(--quick-line);
+  --line-strong: #55514c;
+  --surface: var(--quick-surface);
+  --surface-sunken: rgba(255, 247, 237, 0.07);
+  position: relative;
+  border-radius: var(--radius-panel);
+  background: var(--quick-surface);
+  color: var(--quick-text);
+  padding: clamp(1.25rem, 0.9rem + 1.6vw, 2rem);
+  min-height: 18rem;
+}
+
+.liveInner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* ----------------------------- Status blocks ----------------------------- */
+
+.status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.statusHead {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.statusIcon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  background: rgba(255, 247, 237, 0.08);
+  color: var(--quick-text);
+}
+
+.success {
+  --icon-accent: var(--charcoal);
+  background: var(--tangerine);
+  color: var(--charcoal);
+}
+
+.danger {
+  --icon-accent: var(--charcoal);
+  background: #ffb4a9;
+  color: var(--charcoal);
+}
+
+.statusTitle {
+  font-weight: 800;
+  font-size: var(--text-xl);
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  overflow-wrap: anywhere;
+}
+
+.statusDetail {
+  margin-top: 0.2rem;
+  color: var(--quick-muted);
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.buttons > * {
+  flex: 1 1 11rem;
+}
+
+.note {
+  font-size: var(--text-sm);
+  color: var(--quick-muted);
+}
+
+.scrollList {
+  max-height: 16rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: var(--space-1);
+}
+
+/* ------------------------------ Pairing ticket --------------------------- */
+
+.ghost {
+  --icon-accent: var(--quick-muted);
+  display: grid;
+  place-items: center;
+  justify-self: center;
+  align-self: center;
+  width: min(100%, 13rem);
+  aspect-ratio: 1;
+  margin: var(--space-2) auto 0;
+  border: 2px dashed var(--quick-line);
+  border-radius: var(--radius-ticket);
+  color: var(--quick-line);
+}
+
+.pairing {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-5);
+}
+
+.ticket {
+  justify-self: center;
+  width: min(100%, 17.5rem);
+  padding: 10px;
+  border-radius: var(--radius-ticket);
+  background: #ffffff;
+  box-shadow: 0 18px 40px -24px rgba(0, 0, 0, 0.7);
+}
+
+.codeBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  text-align: center;
+}
+
+.codeLabel {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--quick-muted);
+}
+
+.code {
+  white-space: nowrap;
+  font-size: clamp(2rem, 1.6rem + 1.8vw, 2.6rem);
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  padding-left: 0.14em; /* optically center the tracked text */
+}
+
+.countdown {
+  --icon-accent: var(--tangerine);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--quick-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.help {
+  font-size: var(--text-sm);
+  color: var(--quick-muted);
+  text-align: center;
+  max-width: 28rem;
+  justify-self: center;
+}
+
+@container live (min-width: 34rem) {
+  .code {
+    font-size: 2.1rem;
+  }
+  .pairing {
+    grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+    grid-template-areas:
+      'ticket code'
+      'ticket help'
+      'actions actions'
+      'note note';
+    align-items: center;
+    column-gap: var(--space-6);
+  }
+  .ticket {
+    grid-area: ticket;
+    width: 100%;
+  }
+  .codeBlock {
+    grid-area: code;
+    align-items: flex-start;
+    text-align: left;
+    align-self: end;
+  }
+  .help {
+    grid-area: help;
+    text-align: left;
+    justify-self: start;
+    align-self: start;
+  }
+  .pairing > :nth-child(4) {
+    grid-area: actions;
+  }
+  .pairing > .note {
+    grid-area: note;
+  }
+}
+
+/* ------------------------------- Transfer -------------------------------- */
+
+.transfer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.transferHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.percent {
+  font-size: clamp(2rem, 1.5rem + 2vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--tangerine);
+}
+
+.metrics {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--quick-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.check {
+  color: var(--tangerine);
+}
+
+.badge {
+  --icon-accent: var(--tangerine);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  align-self: flex-start;
+  padding: 0.3rem 0.7rem 0.3rem 0.55rem;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 247, 237, 0.08);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--quick-text);
+}
+
+/* ------------------------------ Received list ---------------------------- */
+
+.received {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.receivedHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.receivedTitle {
+  font-size: var(--text-xl);
+}
+
+.thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--surface-sunken);
+}
+
+@media (max-width: 420px) {
+  .thumb {
+    display: none;
+  }
+}

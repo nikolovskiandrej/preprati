@@ -1,0 +1,130 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  max-width: 46rem;
+  margin: 0 auto;
+  padding-top: clamp(0.5rem, 0.2rem + 2vw, 2rem);
+}
+
+.sheet {
+  --icon-accent: var(--accent-ink);
+  --line: var(--share-line);
+  --surface: var(--share-surface-soft);
+  --surface-sunken: rgba(255, 255, 255, 0.45);
+  --text-muted: var(--share-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: clamp(1.25rem, 0.9rem + 1.8vw, 2.25rem);
+  border-radius: var(--radius-panel);
+  background: var(--share-surface);
+  color: var(--share-text);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .sheet {
+    --surface-sunken: rgba(255, 247, 237, 0.07);
+  }
+}
+
+:root[data-theme='dark'] .sheet {
+  --surface-sunken: rgba(255, 247, 237, 0.07);
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--share-muted);
+}
+
+.title {
+  font-size: clamp(1.75rem, 1.3rem + 2vw, 2.6rem);
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  font-weight: 600;
+  color: var(--share-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-weight: 600;
+  color: var(--share-muted);
+}
+
+.list {
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-ticket);
+  background: var(--share-surface-soft);
+}
+
+.fileError {
+  color: var(--danger);
+  font-weight: 700;
+  white-space: normal;
+}
+
+.all {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.privacy {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--share-muted);
+}
+
+.privacy svg {
+  margin-top: 3px;
+}
+
+.errorText {
+  max-width: 36rem;
+  font-size: var(--text-lg);
+  color: var(--share-text);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.actions:empty {
+  display: none;
+}
+
+.cta {
+  font-size: var(--text-md);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.ctaLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 0.2rem;
+  border-radius: 10px;
+  font-weight: 800;
+  color: var(--text);
+  text-decoration-color: var(--tangerine);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}

@@ -1,0 +1,12 @@
+.lockup {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text);
+  line-height: 0;
+}
+
+.mark {
+  /* The compact mark has generous internal padding; pull it towards the wordmark. */
+  margin-right: -0.1em;
+  transform: translateY(-6%);
+}

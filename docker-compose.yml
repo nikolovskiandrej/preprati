@@ -1,0 +1,24 @@
+# Single-server deployment with encrypted shares on a persistent volume.
+# Put a TLS-terminating reverse proxy (Caddy, Nginx, a load balancer) in front:
+# browsers require HTTPS/WSS for camera-free QR copy, Web Crypto and WebRTC on phones.
+#
+#   docker compose up -d --build
+services:
+  preprati:
+    build: .
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:8787:8787'
+    environment:
+      PUBLIC_ORIGIN: https://preprati.example # change me
+      TRUST_PROXY: '1'
+      STORAGE_DRIVER: local
+      STORAGE_DIR: /data/shares
+      # NOTEA_URL: https://…
+      # TURN_URLS: turn:turn.example.com:3478?transport=udp
+      # TURN_SECRET: ${TURN_SECRET}
+    volumes:
+      - preprati-data:/data
+
+volumes:
+  preprati-data:

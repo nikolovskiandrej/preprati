@@ -1,0 +1,115 @@
+.app {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.skip {
+  position: absolute;
+  left: var(--gutter);
+  top: -100px;
+  z-index: 120;
+  padding: 0.6rem 1rem;
+  border-radius: 12px;
+  background: var(--charcoal);
+  color: var(--cream);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.skip:focus {
+  top: var(--space-3);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-4) var(--gutter);
+}
+
+.home {
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
+  color: var(--text);
+  text-decoration: none;
+  border-radius: 12px;
+}
+
+.logoPlaceholder {
+  visibility: hidden;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.locales {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 13px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+}
+
+.locale {
+  min-width: 42px;
+  min-height: 38px;
+  padding: 0 0.55rem;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: var(--text-sm);
+  letter-spacing: 0.02em;
+}
+
+.locale[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(37, 37, 37, 0.08);
+}
+
+.theme {
+  --icon-accent: var(--accent-ink);
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.theme:hover {
+  background: var(--surface-hover);
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-2) var(--gutter) var(--space-12);
+  outline: none;
+}
+
+.footer {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-5) var(--gutter) calc(var(--space-6) + env(safe-area-inset-bottom));
+  display: flex;
+  justify-content: flex-start;
+  border-top: 1px solid var(--line);
+}

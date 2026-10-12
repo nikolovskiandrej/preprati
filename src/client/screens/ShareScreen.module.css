@@ -1,0 +1,310 @@
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+
+@media (min-width: 900px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    gap: var(--space-8);
+  }
+}
+
+.limits {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-muted);
+}
+
+.inlineButton {
+  margin-top: var(--space-3);
+}
+
+.unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-5);
+  max-width: 38rem;
+}
+
+.adminHint {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+/* The peach "later" surface marks Share Files throughout the app. */
+.laterPanel,
+.uploadPanel,
+.ready {
+  --icon-accent: var(--accent-ink);
+  --line: var(--share-line);
+  --surface: var(--share-surface-soft);
+  --surface-sunken: rgba(255, 255, 255, 0.4);
+  --text-muted: var(--share-muted);
+  border-radius: var(--radius-panel);
+  background: var(--share-surface);
+  color: var(--share-text);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) :is(.laterPanel, .uploadPanel, .ready) {
+    --surface-sunken: rgba(255, 247, 237, 0.06);
+  }
+}
+
+:root[data-theme='dark'] :is(.laterPanel, .uploadPanel, .ready) {
+  --surface-sunken: rgba(255, 247, 237, 0.06);
+}
+
+.laterPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: clamp(1.25rem, 0.9rem + 1.6vw, 2rem);
+}
+
+.laterHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.laterIcon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  flex: none;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .laterIcon {
+    background: rgba(255, 247, 237, 0.08);
+  }
+}
+
+:root[data-theme='dark'] .laterIcon {
+  background: rgba(255, 247, 237, 0.08);
+}
+
+.laterTitle {
+  font-size: var(--text-xl);
+}
+
+.laterBody {
+  color: var(--share-muted);
+  font-size: var(--text-md);
+}
+
+/* Upload progress */
+
+.uploadPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 44rem;
+  padding: clamp(1.25rem, 0.9rem + 1.6vw, 2rem);
+}
+
+.uploadHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.uploadTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 800;
+  font-size: var(--text-xl);
+}
+
+.uploadPercent {
+  font-size: clamp(2rem, 1.5rem + 2vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.uploadMetrics {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--share-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Ready */
+
+.ready {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  padding: clamp(1.25rem, 0.9rem + 1.6vw, 2.25rem);
+}
+
+@media (min-width: 900px) {
+  .ready {
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    gap: var(--space-8);
+    align-items: start;
+  }
+}
+
+.ticketColumn {
+  display: flex;
+  justify-content: center;
+}
+
+.ticket {
+  width: min(100%, 22rem);
+  padding: 12px;
+  border-radius: var(--radius-ticket);
+  background: #ffffff;
+  box-shadow: var(--shadow-ticket);
+}
+
+.infoColumn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  align-self: flex-start;
+  padding: 0.35rem 0.75rem 0.35rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.55);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.pillOpened {
+  --icon-accent: var(--success);
+  color: var(--text);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .pill {
+    background: rgba(255, 247, 237, 0.08);
+  }
+}
+
+:root[data-theme='dark'] .pill {
+  background: rgba(255, 247, 237, 0.08);
+}
+
+.facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: var(--text-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.facts li:first-child {
+  font-size: var(--text-xl);
+  font-weight: 800;
+  letter-spacing: -0.015em;
+}
+
+.facts li:last-child {
+  color: var(--share-muted);
+}
+
+.linkField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.linkLabel {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--share-muted);
+}
+
+.linkInput {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 0.85rem;
+  border: 1.5px solid var(--share-line);
+  border-radius: var(--radius-input);
+  background: var(--share-surface-soft);
+  color: var(--share-text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
+
+.readyActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.endState {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-5);
+  max-width: 38rem;
+}
+
+/* Earlier shares */
+
+.owned {
+  margin-top: var(--space-10);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 44rem;
+}
+
+.ownedTitle {
+  font-size: var(--text-lg);
+}
+
+.ownedList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ownedList li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}

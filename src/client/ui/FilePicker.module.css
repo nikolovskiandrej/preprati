@@ -1,0 +1,91 @@
+.zone {
+  --icon-accent: var(--accent-ink);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 15rem;
+  padding: var(--space-8) var(--space-5);
+  border: 1.5px dashed var(--line-strong);
+  border-radius: var(--radius-ticket);
+  background: var(--surface);
+  text-align: center;
+  transition:
+    border-color var(--duration-fast) ease,
+    background-color var(--duration-fast) ease;
+}
+
+.onDark {
+  --icon-accent: var(--tangerine);
+  border-color: var(--quick-line);
+  background: transparent;
+}
+
+.dragging {
+  border-color: var(--tangerine);
+  border-style: solid;
+  background: color-mix(in srgb, var(--tangerine) 9%, var(--surface));
+}
+
+.onDark.dragging {
+  background: color-mix(in srgb, var(--tangerine) 14%, transparent);
+}
+
+.glyph {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: var(--space-1);
+  border-radius: 18px;
+  background: var(--surface-sunken);
+}
+
+.onDark .glyph {
+  background: rgba(255, 247, 237, 0.08);
+}
+
+.title {
+  font-weight: 700;
+  font-size: var(--text-lg);
+}
+
+.or {
+  font-size: var(--text-sm);
+  color: var(--text-subtle);
+  margin-bottom: var(--space-2);
+}
+
+.onDark .or {
+  color: var(--quick-muted);
+}
+
+/* Touch devices: no drag-and-drop hint, just the button. */
+@media (hover: none) {
+  .zone {
+    min-height: 0;
+    padding: var(--space-6) var(--space-4);
+  }
+  .title,
+  .or {
+    display: none;
+  }
+}
+
+.compact {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  border-radius: 14px;
+}
+
+.compact.dragging {
+  outline: 2px dashed var(--tangerine);
+  outline-offset: 4px;
+}
+
+.compactHint {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}

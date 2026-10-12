@@ -1,0 +1,159 @@
+/*
+ * preprati. design tokens.
+ * Brand palette: Cream #FFF7ED · Tangerine #F97316 · Charcoal #252525 · Peach #FED7AA.
+ * Additional values are neutral/derived shades needed for text contrast,
+ * borders and states. Tangerine is never used as small text on cream
+ * (2.8:1); --accent-ink (#C2410C, 4.9:1) is used instead.
+ */
+:root {
+  /* Brand */
+  --cream: #fff7ed;
+  --tangerine: #f97316;
+  --charcoal: #252525;
+  --peach: #fed7aa;
+
+  /* Surfaces & text (light) */
+  --bg: var(--cream);
+  --surface: #fffcf8;
+  --surface-sunken: #fbefe1;
+  --surface-hover: #fff3e4;
+  --line: #ecdfcf;
+  --line-strong: #dccab5;
+  --text: var(--charcoal);
+  --text-muted: #6b625b;
+  --text-subtle: #776d66;
+  --accent: var(--tangerine);
+  --accent-hover: #ea6a0c;
+  --accent-ink: #c2410c;
+  --on-accent: var(--charcoal);
+  --focus: #c2410c;
+
+  /* Mode tints: Quick Transfer is "live" (charcoal), Share Files is "later" (peach). */
+  --quick-surface: var(--charcoal);
+  --quick-text: var(--cream);
+  --quick-muted: #c9bfb5;
+  --quick-line: #3b3936;
+  --share-surface: var(--peach);
+  --share-surface-soft: #ffe7cc;
+  --share-text: var(--charcoal);
+  --share-muted: #6a4a2f;
+  --share-line: #f3c48f;
+
+  /* Status (used sparingly, always paired with an icon and words) */
+  --success: #2e7d4f;
+  --success-soft: #e3f2e7;
+  --danger: #b42318;
+  --danger-soft: #fde8e5;
+  --warning: #8a5300;
+  --warning-soft: #fff1d6;
+
+  /* Type */
+  --font-sans:
+    'Manrope Variable', 'Manrope', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.0625rem;
+  --text-xl: 1.25rem;
+  --text-2xl: clamp(1.6rem, 1.25rem + 1.5vw, 2.35rem);
+  --text-display: clamp(3rem, 1.55rem + 6.2vw, 6rem);
+
+  /* Space (4px base) */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --gutter: clamp(1rem, 0.6rem + 2vw, 2rem);
+  --content-max: 70rem;
+
+  /* Radii — by hierarchy, not one value for everything */
+  --radius-input: 12px;
+  --radius-button: 14px;
+  --radius-ticket: 20px;
+  --radius-panel: 28px;
+  --radius-pill: 999px;
+
+  /* Elevation — warm and rare */
+  --shadow-ticket: 0 1px 0 rgba(37, 37, 37, 0.04), 0 22px 44px -28px rgba(124, 45, 18, 0.42);
+  --shadow-overlay: 0 24px 64px -24px rgba(37, 37, 37, 0.45);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 140ms;
+  --duration-base: 220ms;
+
+  /* Breakpoints (reference): 640 tablet, 960 desktop, 1200 wide */
+  color-scheme: light;
+}
+
+/* Dark appearance: follows the OS unless the user picked a theme explicitly. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #1c1b1a;
+    --surface: #252423;
+    --surface-sunken: #1f1e1d;
+    --surface-hover: #2d2b29;
+    --line: #36332f;
+    --line-strong: #4a4641;
+    --text: var(--cream);
+    --text-muted: #bfb4a9;
+    --text-subtle: #9a8f85;
+    --accent-ink: #fb923c;
+    --focus: #fdba74;
+    --quick-surface: #2b2a28;
+    --quick-text: var(--cream);
+    --quick-muted: #c9bfb5;
+    --quick-line: #403d39;
+    --share-surface: #3a2a1b;
+    --share-surface-soft: #463220;
+    --share-text: var(--cream);
+    --share-muted: #f2c79a;
+    --share-line: #5a4129;
+    --success: #6fcf97;
+    --success-soft: #1f3a2a;
+    --danger: #ff8a7a;
+    --danger-soft: #45201b;
+    --warning: #f6c56b;
+    --warning-soft: #3d2f12;
+    --shadow-ticket: 0 22px 44px -28px rgba(0, 0, 0, 0.8);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #1c1b1a;
+  --surface: #252423;
+  --surface-sunken: #1f1e1d;
+  --surface-hover: #2d2b29;
+  --line: #36332f;
+  --line-strong: #4a4641;
+  --text: var(--cream);
+  --text-muted: #bfb4a9;
+  --text-subtle: #9a8f85;
+  --accent-ink: #fb923c;
+  --focus: #fdba74;
+  --quick-surface: #2b2a28;
+  --quick-text: var(--cream);
+  --quick-muted: #c9bfb5;
+  --quick-line: #403d39;
+  --share-surface: #3a2a1b;
+  --share-surface-soft: #463220;
+  --share-text: var(--cream);
+  --share-muted: #f2c79a;
+  --share-line: #5a4129;
+  --success: #6fcf97;
+  --success-soft: #1f3a2a;
+  --danger: #ff8a7a;
+  --danger-soft: #45201b;
+  --warning: #f6c56b;
+  --warning-soft: #3d2f12;
+  --shadow-ticket: 0 22px 44px -28px rgba(0, 0, 0, 0.8);
+  color-scheme: dark;
+}

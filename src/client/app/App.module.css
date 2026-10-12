@@ -1,0 +1,27 @@
+.screen {
+  width: 100%;
+}
+
+.fallback {
+  display: grid;
+  place-items: center;
+  min-height: 40vh;
+  color: var(--text-muted);
+}
+
+.crash {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  max-width: 34rem;
+  padding: var(--space-12) 0;
+}
+
+.crash h1 {
+  font-size: var(--text-2xl);
+}
+
+.crash p {
+  color: var(--text-muted);
+}

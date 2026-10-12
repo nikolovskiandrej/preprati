@@ -1,0 +1,8 @@
+.icon {
+  flex: none;
+  vertical-align: middle;
+}
+
+.icon-accent {
+  stroke: var(--icon-accent, currentColor);
+}

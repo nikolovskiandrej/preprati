@@ -1,0 +1,45 @@
+.attribution {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-decoration: none;
+  border-radius: 8px;
+}
+
+a.attribution:hover .name {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.chip {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 7px;
+  line-height: 0;
+}
+
+.logo {
+  width: 26px;
+  height: 19px;
+  object-fit: contain;
+}
+
+.name {
+  color: var(--text);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .chip {
+    background: var(--cream);
+    padding: 3px 4px;
+  }
+}
+
+:root[data-theme='dark'] .chip {
+  background: var(--cream);
+  padding: 3px 4px;
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+coverage/
+playwright-report/
+test-results/
+blob-report/
+.env
+.env.*.local
+.env.local
+*.log
+.DS_Store
+.vite/
+.vercel/

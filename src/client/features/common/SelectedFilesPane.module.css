@@ -1,0 +1,54 @@
+.pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.title {
+  font-size: var(--text-xl);
+}
+
+.summary {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.list {
+  padding: var(--space-1) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ticket);
+  background: var(--surface);
+  max-height: min(26rem, 60vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.remove {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.remove:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.problem {
+  color: var(--danger);
+  font-weight: 700;
+}

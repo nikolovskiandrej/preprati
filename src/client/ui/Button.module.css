@@ -1,0 +1,131 @@
+.button {
+  --icon-accent: currentColor;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  min-height: 48px;
+  padding: 0 1.15rem;
+  border: 1.5px solid transparent;
+  border-radius: var(--radius-button);
+  font-weight: 700;
+  font-size: var(--text-md);
+  letter-spacing: -0.005em;
+  line-height: 1.15;
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color var(--duration-fast) ease,
+    border-color var(--duration-fast) ease,
+    color var(--duration-fast) ease,
+    box-shadow var(--duration-fast) ease;
+}
+
+.label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sm {
+  min-height: 40px;
+  padding: 0 0.85rem;
+  font-size: var(--text-sm);
+  gap: 0.45rem;
+  border-radius: 11px;
+}
+
+.lg {
+  min-height: 56px;
+  padding: 0 1.45rem;
+  font-size: var(--text-lg);
+}
+
+.full {
+  width: 100%;
+}
+
+.button:disabled {
+  opacity: 0.55;
+}
+
+.button[aria-busy='true'] {
+  opacity: 0.85;
+}
+
+/* primary — tangerine with charcoal label (5.5:1) */
+.primary {
+  background: var(--tangerine);
+  color: var(--charcoal);
+}
+.primary:not(:disabled):hover {
+  background: var(--accent-hover);
+}
+
+/* dark — charcoal on light surfaces */
+.dark {
+  background: var(--text);
+  color: var(--bg);
+}
+.dark:not(:disabled):hover {
+  background: color-mix(in srgb, var(--text) 86%, var(--bg));
+}
+
+/* inverse — cream on charcoal surfaces */
+.inverse {
+  background: var(--cream);
+  color: var(--charcoal);
+}
+.inverse:not(:disabled):hover {
+  background: #ffffff;
+}
+
+.ghost {
+  background: transparent;
+  color: inherit;
+  border-color: color-mix(in srgb, currentColor 28%, transparent);
+}
+.ghost:not(:disabled):hover {
+  border-color: color-mix(in srgb, currentColor 55%, transparent);
+  background: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+.quiet {
+  background: transparent;
+  color: inherit;
+  padding-inline: 0.65rem;
+}
+.quiet:not(:disabled):hover {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+.danger:not(:disabled):hover {
+  background: var(--danger-soft);
+}
+
+.danger-solid {
+  background: #b42318;
+  color: #ffffff;
+}
+.danger-solid:not(:disabled):hover {
+  background: #9a1c13;
+}
+
+.button:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: var(--radius-button);
+}
+
+@media (forced-colors: active) {
+  .button {
+    border-color: ButtonText;
+  }
+}

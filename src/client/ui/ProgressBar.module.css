@@ -1,0 +1,66 @@
+.root {
+  position: relative;
+  width: 100%;
+  --track: color-mix(in srgb, currentColor 12%, transparent);
+  --fill: var(--tangerine);
+}
+
+.withPlane {
+  padding-inline: 13px;
+}
+
+.inner {
+  position: relative;
+}
+
+.track {
+  position: relative;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--track);
+  overflow: hidden;
+}
+
+.sm .track {
+  height: 6px;
+}
+
+.fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 50%;
+  border-radius: inherit;
+  background: var(--fill);
+}
+
+.success {
+  --fill: var(--success);
+}
+
+.neutral {
+  --fill: currentColor;
+}
+
+.inverse {
+  --track: rgba(255, 247, 237, 0.16);
+}
+
+.plane {
+  position: absolute;
+  top: 50%;
+  translate: -50% -50%;
+  margin-left: 2px;
+  color: var(--charcoal);
+  background: var(--tangerine);
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 0 0 3px var(--plane-ring, var(--surface));
+  pointer-events: none;
+}
+
+.inverse .plane {
+  --plane-ring: var(--quick-surface);
+}

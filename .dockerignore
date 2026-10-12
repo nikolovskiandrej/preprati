@@ -1,0 +1,15 @@
+node_modules
+dist
+data
+coverage
+test-results
+playwright-report
+blob-report
+.env
+.env.*
+!.env.example
+.git
+*.log
+# Brand reference images (not needed at runtime; the app uses processed assets)
+Современ концепт за бренд Препрати.png
+Pasted image.png
