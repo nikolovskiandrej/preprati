@@ -364,7 +364,7 @@ describe('KvUsageTracker', () => {
 });
 
 describe('MemoryKv', () => {
-  it('honours TTLs, refreshes on read, drains lists atomically', async () => {
+  it('honours TTLs, refreshes on read, numbers inbox entries', async () => {
     let now = 0;
     const kv = new MemoryKv(() => now);
     await kv.setJson('a', { x: 1 }, { ttlMs: 1000 });
@@ -376,10 +376,19 @@ describe('MemoryKv', () => {
     now = 1901;
     expect(await kv.getJson('a')).toBeNull();
 
-    await kv.push('list', [1, 2], 1000);
-    await kv.push('list', [3], 1000);
-    expect(await kv.drain('list')).toEqual([1, 2, 3]);
-    expect(await kv.drain('list')).toEqual([]);
+    expect(await kv.inboxPush('inbox', 'counter', 'a', 1000)).toBe(1);
+    expect(await kv.inboxPush('inbox', 'counter', { b: 2 }, 1000)).toBe(2);
+    expect(await kv.inboxPush('inbox', 'counter', 'c', 1000)).toBe(3);
+    expect(await kv.inboxRead('inbox', 'counter', 0, 1000)).toEqual({
+      first: 1,
+      items: ['a', { b: 2 }, 'c'],
+    });
+    expect(await kv.inboxRead('inbox', 'counter', 2, 1000)).toEqual({ first: 3, items: ['c'] });
+    expect(await kv.inboxRead('inbox', 'counter', 3, 1000)).toEqual({ first: 0, items: [] });
+    expect(await kv.inboxPush('inbox', 'counter', 'd', 1000)).toBe(4);
+    // Without an acknowledgement, a read removes what it returns.
+    expect(await kv.inboxRead('inbox', 'counter', null, 1000)).toEqual({ first: 4, items: ['d'] });
+    expect(await kv.inboxRead('inbox', 'counter', null, 1000)).toEqual({ first: 0, items: [] });
 
     expect(await kv.incrBy('n', 5, 100)).toBe(5);
     expect(await kv.incrBy('n', 5, 100)).toBe(10);

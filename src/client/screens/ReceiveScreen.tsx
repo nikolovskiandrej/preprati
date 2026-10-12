@@ -4,22 +4,25 @@
  */
 import { useEffect, type ReactNode } from 'react';
 import { useLocation } from 'wouter';
+import { useConfig } from '../app/config';
 import { useLeaveWarning, useOwnedStore } from '../app/hooks';
 import { FlowHeader } from '../features/common/FlowHeader';
 import { describeQuickError } from '../features/quick/errors';
 import {
+  ConnectingStatus,
   ConnectionBadge,
   IncomingOffer,
   LivePanel,
   PairingTicket,
   QuickError,
+  ReconnectingNotice,
   ReceivedFilesList,
   StatusBlock,
   TransferDone,
   TransferProgress,
 } from '../features/quick/panels';
 import { useI18n } from '../i18n';
-import { DownloadIcon } from '../icons';
+import { DownloadIcon, RetryIcon } from '../icons';
 import { QuickSession, type QuickState } from '../transfer/quickSession';
 import { Button } from '../ui/Button';
 import styles from './QuickScreens.module.css';
@@ -28,6 +31,7 @@ export default function ReceiveScreen() {
   const { t } = useI18n();
   const [, navigate] = useLocation();
   const [session, state] = useOwnedStore<QuickState, QuickSession>(() => new QuickSession());
+  const { config } = useConfig();
   const phase = state?.phase ?? 'idle';
   useLeaveWarning(phase === 'transferring' || (state?.received.length ?? 0) > 0);
 
@@ -43,23 +47,38 @@ export default function ReceiveScreen() {
     if (!state || !session || phase === 'idle' || phase === 'creating-session') {
       return { key: 'creating', node: <StatusBlock busy title={t('quick.creating')} /> };
     }
-    const error = describeQuickError(state);
+    const error = describeQuickError(state, { shareAvailable: config?.share.enabled === true });
     if (error) {
+      const retry = error.connection?.canRetry === true;
       return {
-        key: `error-${error.message}`,
+        key: `error-${error.message}-${retry}`,
         node: (
           <QuickError
             view={error}
             actions={
-              error.recovery === 'home' ? (
-                <Button variant="inverse" onClick={() => navigate('/')}>
-                  {t('common.goHome')}
-                </Button>
-              ) : (
-                <Button variant="primary" onClick={() => void session.host('receiver')}>
-                  {t('quick.newSession')}
-                </Button>
-              )
+              <>
+                {retry ? (
+                  <Button
+                    variant="primary"
+                    icon={RetryIcon}
+                    onClick={() => session.retryConnection()}
+                  >
+                    {t('quick.tryAgain')}
+                  </Button>
+                ) : null}
+                {error.recovery === 'home' ? (
+                  <Button variant="inverse" onClick={() => navigate('/')}>
+                    {t('common.goHome')}
+                  </Button>
+                ) : (
+                  <Button
+                    variant={retry ? 'ghost' : 'primary'}
+                    onClick={() => void session.host('receiver')}
+                  >
+                    {t('quick.newSession')}
+                  </Button>
+                )}
+              </>
             }
           />
         ),
@@ -77,16 +96,7 @@ export default function ReceiveScreen() {
           : { key: 'creating', node: <StatusBlock busy title={t('quick.creating')} /> };
       case 'peer-connected':
       case 'connecting':
-        return {
-          key: 'connecting',
-          node: (
-            <StatusBlock
-              busy
-              title={t('quick.connecting', { device })}
-              detail={t('quick.connectingHint')}
-            />
-          ),
-        };
+        return { key: 'connecting', node: <ConnectingStatus device={device} /> };
       case 'connected':
         return {
           key: 'connected',
@@ -176,7 +186,10 @@ export default function ReceiveScreen() {
     <div>
       <FlowHeader title={t('quick.receiveTitle')} lead={t('quick.receiveLead')} mode="quick" />
       <div className={styles.receive}>
-        <LivePanel stateKey={live.key}>{live.node}</LivePanel>
+        <LivePanel stateKey={live.key}>
+          {state?.reconnecting ? <ReconnectingNotice /> : null}
+          {live.node}
+        </LivePanel>
         <aside className={styles.side}>
           {state && state.received.length > 0 ? (
             <ReceivedFilesList files={state.received} />

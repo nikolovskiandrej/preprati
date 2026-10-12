@@ -2,7 +2,7 @@
 /**
  * The browser's HTTP polling transport against the real backend.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { HttpSignalingClient } from '../../src/client/transfer/httpSignalingClient';
 import type { ServerMessage } from '../../src/shared/signaling';
 import { startTestServer, type TestServer } from '../helpers/server';
@@ -110,9 +110,126 @@ describe('HttpSignalingClient', () => {
     expect(client.isOpen).toBe(false);
   });
 
+  it('gets messages again when a response is lost on the way', async () => {
+    const host = new HttpSignalingClient(server.url);
+    const guest = new HttpSignalingClient(server.url);
+    const hostInbox = collector(host);
+    const guestInbox = collector(guest);
+    await host.connect();
+    await guest.connect();
+    host.send({ type: 'create-session', role: 'receiver', device: { label: 'Laptop' } });
+    const created = await hostInbox.next('session-created');
+    guest.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: { label: 'Phone' },
+    });
+    await guestInbox.next('session-joined');
+    await hostInbox.next('peer-joined');
+
+    // The server answers the guest's next poll, but the answer never arrives (a mobile
+    // network switching cells, a dropped connection): the request fails client-side.
+    const guestId = (guest as unknown as { credentials: { connectionId: string } }).credentials
+      .connectionId;
+    const realFetch = globalThis.fetch;
+    let lost = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const response = await realFetch(input, init);
+      const headers = new Headers(init?.headers);
+      if (lost === 0 && headers.get('X-Signal-Connection') === guestId) {
+        const body = (await response.clone().json()) as { messages?: Array<{ type: string }> };
+        if (body.messages?.some((message) => message.type === 'signal')) {
+          lost += 1;
+          throw new TypeError('Failed to fetch');
+        }
+      }
+      return response;
+    });
+    const offer = {
+      kind: 'description' as const,
+      description: { type: 'offer' as const, sdp: 'v=0' },
+    };
+    host.send({ type: 'signal', payload: offer });
+
+    expect((await guestInbox.next('signal', 10_000)).payload).toEqual(offer);
+    expect(lost).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 1_500)); // a few more polls
+    expect(guestInbox.messages.filter((message) => message.type === 'signal')).toEqual([]);
+    vi.restoreAllMocks();
+    host.close();
+    guest.close();
+  });
+
   it('rejects connect when signaling is unavailable', async () => {
     const client = new HttpSignalingClient('http://127.0.0.1:9'); // discard port: nothing listens
     await expect(client.connect(2000)).rejects.toBeTruthy();
     expect(client.isOpen).toBe(false);
+  });
+});
+
+describe('HttpSignalingClient pacing', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** A fake server: counts polls, answers with the given batches, records acknowledgements. */
+  function fakeServer(batches: Array<{ messages: unknown[]; firstSeq: number }> = []) {
+    const polls: number[] = [];
+    const acks: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/signal/connect'))
+        return Response.json(
+          { connectionId: 'c'.repeat(22), token: 't'.repeat(43) },
+          { status: 201 },
+        );
+      acks.push(new Headers(init?.headers).get('X-Signal-Ack') ?? '');
+      if (url.endsWith('/api/signal/poll')) polls.push(Date.now());
+      return Response.json(batches.shift() ?? { messages: [], firstSeq: 0 });
+    });
+    return { polls, acks };
+  }
+
+  it('polls fast while active, then at the pace the session asks for', async () => {
+    vi.useFakeTimers();
+    const { polls } = fakeServer();
+    const client = new HttpSignalingClient('http://signal.test');
+    await client.connect();
+    await vi.advanceTimersByTimeAsync(6_000);
+    const active = polls.length;
+    expect(active).toBeGreaterThanOrEqual(12); // every 400 ms right after connecting
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(polls.length - active).toBeLessThanOrEqual(5); // then every 1.5 s while pairing
+
+    client.setPace('quiet');
+    await vi.advanceTimersByTimeAsync(2_000); // let the 1.5 s poll already scheduled run
+    const quietStart = polls.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(polls.length - quietStart).toBe(2); // every 15 s once the devices talk directly
+
+    const beforeNudge = polls.length;
+    client.setPace('normal'); // e.g. the direct path dropped: check right away
+    await vi.advanceTimersByTimeAsync(10);
+    expect(polls.length).toBe(beforeNudge + 1);
+    client.close();
+  });
+
+  it('acknowledges what it handled and skips messages it already has', async () => {
+    vi.useFakeTimers();
+    const left = { type: 'peer-left' };
+    const { acks } = fakeServer([
+      { messages: [left], firstSeq: 1 },
+      { messages: [left, { type: 'session-expired' }], firstSeq: 1 }, // overlapping redelivery
+    ]);
+    const client = new HttpSignalingClient('http://signal.test');
+    const received: string[] = [];
+    client.onMessage((message) => received.push(message.type));
+    await client.connect();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(received).toEqual(['peer-left', 'session-expired']);
+    expect(acks.slice(0, 3)).toEqual(['0', '1', '2']);
+    client.close();
   });
 });

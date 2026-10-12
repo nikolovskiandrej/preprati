@@ -101,3 +101,28 @@ export function readStoredZip(zip: Buffer): Map<string, Buffer> {
   }
   return entries;
 }
+
+/**
+ * Makes the first WebRTC connection attempt in this browser context impossible,
+ * like two networks that don't allow a direct path: remote candidates point
+ * to an address nobody answers on. Later attempts ("Try again") work normally.
+ */
+export async function blockFirstConnection(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const Native = window.RTCPeerConnection;
+    let created = 0;
+    window.RTCPeerConnection = class extends Native {
+      constructor(...args: ConstructorParameters<typeof RTCPeerConnection>) {
+        super(...args);
+        if (created++ > 0) return;
+        const add = this.addIceCandidate.bind(this);
+        this.addIceCandidate = (candidate?: RTCIceCandidateInit | null) => {
+          if (!candidate?.candidate) return add(candidate ?? undefined);
+          const parts = candidate.candidate.split(' ');
+          parts[4] = '192.0.2.1'; // TEST-NET-1: never answers
+          return add({ ...candidate, candidate: parts.join(' ') });
+        };
+      }
+    };
+  });
+}

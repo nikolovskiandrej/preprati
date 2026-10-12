@@ -3,8 +3,20 @@
  * ordered data channel (id 0). The session host always creates the offer, so
  * there is no offer glare to resolve. Remote ICE candidates that arrive
  * before the remote description are queued.
+ *
+ * Connecting: the attempt fails when ICE fails, or when nothing has opened
+ * after `connectTimeoutMs`. The failure comes with diagnostics (see
+ * ./diagnostics.ts) so the interface can say why.
+ *
+ * Staying connected: once the data channel has been open, a dropped network
+ * path (Wi-Fi ↔ mobile data, a short outage) is repaired with an ICE restart:
+ * the offerer renegotiates fresh candidates over signaling while the data
+ * channel, and any transfer on it, stays open. Restarts are limited per drop
+ * and bounded by `reconnectWindowMs`; after that the connection counts as lost.
  */
 import type { IceServerConfig, SignalPayload } from '../../shared/signaling';
+import { CandidateLog, type ConnectionDiagnostics } from './diagnostics';
+import { countIceServers, toRtcIceServers } from './iceConfig';
 
 export type ConnectionRoute = 'direct' | 'relay' | 'unknown';
 export type PeerFailure = 'ice-failed' | 'timeout';
@@ -12,31 +24,58 @@ export type PeerFailure = 'ice-failed' | 'timeout';
 export interface PeerLinkOptions {
   iceServers: IceServerConfig[];
   isOfferer: boolean;
+  /** Connection attempt this link belongs to; every outgoing signal carries it. */
+  attempt?: number;
   sendSignal: (payload: SignalPayload) => void;
   onOpen: () => void;
   /** The connection never came up. */
-  onFailed: (reason: PeerFailure) => void;
+  onFailed: (reason: PeerFailure, diagnostics: ConnectionDiagnostics) => void;
   /** The connection was up and then dropped for good. */
   onLost: () => void;
+  /** The network path dropped and is being repaired (true), or works again (false). */
+  onReconnecting?: (reconnecting: boolean) => void;
   connectTimeoutMs?: number;
+  /** Before the channel first opens: how long ICE may stay "disconnected". */
   disconnectGraceMs?: number;
+  /** After it opened: how long a dropped connection may take to recover. */
+  reconnectWindowMs?: number;
+  /** How long ICE may stay "disconnected" before the offerer restarts it. */
+  restartDelayMs?: number;
 }
+
+/** ICE restarts per drop: one right away, one more if the first doesn't bring the path back. */
+const MAX_RESTARTS_PER_DROP = 2;
+const RESTART_RETRY_MS = 8_000;
+
+type TimerName = 'connect' | 'grace' | 'reconnect' | 'restart';
 
 export class PeerLink {
   readonly pc: RTCPeerConnection;
   readonly channel: RTCDataChannel;
+  readonly attempt: number;
   private readonly options: PeerLinkOptions;
+  private readonly startedAt = Date.now();
+  private readonly servers: { stun: number; turn: number };
+  private readonly localCandidates = new CandidateLog();
+  private readonly remoteCandidates = new CandidateLog();
+  private readonly iceStates: ConnectionDiagnostics['iceStates'] = [];
+  private readonly timers = new Map<TimerName, ReturnType<typeof setTimeout>>();
   private remoteDescriptionSet = false;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private opened = false;
   private closed = false;
-  private connectTimer: ReturnType<typeof setTimeout> | null = null;
-  private graceTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnecting = false;
+  private restartInFlight = false;
+  private restartsThisDrop = 0;
+  private restarts = 0;
   private signalChain: Promise<void> = Promise.resolve();
 
   constructor(options: PeerLinkOptions) {
     this.options = options;
-    this.pc = new RTCPeerConnection({ iceServers: options.iceServers as RTCIceServer[] });
+    this.attempt = options.attempt ?? 0;
+    const iceServers = toRtcIceServers(options.iceServers);
+    this.servers = countIceServers(iceServers);
+    this.pc = new RTCPeerConnection({ iceServers });
     this.channel = this.pc.createDataChannel('preprati', {
       negotiated: true,
       id: 0,
@@ -47,7 +86,8 @@ export class PeerLink {
     this.pc.onicecandidate = (event) => {
       if (!event.candidate || !event.candidate.candidate) return;
       const json = event.candidate.toJSON();
-      options.sendSignal({
+      this.localCandidates.add(json.candidate ?? '');
+      this.signal({
         kind: 'candidate',
         candidate: {
           candidate: json.candidate ?? '',
@@ -57,18 +97,20 @@ export class PeerLink {
         },
       });
     };
-    this.pc.onconnectionstatechange = () => this.handleState(this.pc.connectionState);
     this.pc.oniceconnectionstatechange = () => {
-      // Fallback for engines with incomplete `connectionState` support.
-      const ice = this.pc.iceConnectionState;
-      if (ice === 'failed') this.handleState('failed');
-      else if (ice === 'disconnected') this.handleState('disconnected');
-      else if (ice === 'connected' || ice === 'completed') this.handleState('connected');
+      const state = this.pc.iceConnectionState;
+      this.iceStates.push({ state, atMs: Date.now() - this.startedAt });
+      this.handleIceState(state);
+    };
+    // DTLS failures only surface here; ICE failures arrive (once) through iceconnectionstatechange.
+    this.pc.onconnectionstatechange = () => {
+      if (this.pc.connectionState === 'failed' && this.pc.iceConnectionState !== 'failed')
+        this.handleIceState('failed');
     };
     this.channel.addEventListener('open', () => {
       if (this.closed || this.opened) return;
       this.opened = true;
-      this.clearConnectTimer();
+      this.clearTimer('connect');
       options.onOpen();
     });
     this.channel.addEventListener('close', () => {
@@ -79,19 +121,13 @@ export class PeerLink {
 
   /** Starts negotiation (offerer) and the connection timeout (both sides). */
   async start(): Promise<void> {
-    this.connectTimer = setTimeout(() => {
+    this.setTimer('connect', this.options.connectTimeoutMs ?? 30_000, () => {
       if (!this.opened) this.fail('timeout');
-    }, this.options.connectTimeoutMs ?? 30_000);
+    });
     if (!this.options.isOfferer) return;
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
-    const local = this.pc.localDescription;
-    if (local && !this.closed) {
-      this.options.sendSignal({
-        kind: 'description',
-        description: { type: 'offer', sdp: local.sdp },
-      });
-    }
+    this.sendLocalDescription();
   }
 
   /** Applies remote signaling in arrival order. */
@@ -105,8 +141,28 @@ export class PeerLink {
     return this.signalChain;
   }
 
+  /** True once the data channel has opened and while the link is not closed. */
+  get isOpen(): boolean {
+    return this.opened && !this.closed;
+  }
+
+  /** What this attempt learned about both networks so far (no addresses). */
+  diagnostics(): ConnectionDiagnostics {
+    return {
+      attempt: this.attempt,
+      stunServers: this.servers.stun,
+      turnServers: this.servers.turn,
+      local: this.localCandidates.summary(),
+      remote: this.remoteCandidates.summary(),
+      iceStates: [...this.iceStates],
+      durationMs: Date.now() - this.startedAt,
+      restarts: this.restarts,
+    };
+  }
+
   private async applySignal(payload: SignalPayload): Promise<void> {
     if (this.closed) return;
+    if (payload.kind === 'retry') return; // handled by the session
     if (payload.kind === 'description') {
       const { description } = payload;
       if (description.type === 'offer' && this.options.isOfferer) return; // never expected
@@ -116,19 +172,15 @@ export class PeerLink {
       this.pendingCandidates = [];
       for (const candidate of queued) await this.addCandidate(candidate);
       if (description.type === 'offer') {
+        // The first offer, or an ICE restart after the connection dropped.
         const answer = await this.pc.createAnswer();
         await this.pc.setLocalDescription(answer);
-        const local = this.pc.localDescription;
-        if (local && !this.closed) {
-          this.options.sendSignal({
-            kind: 'description',
-            description: { type: 'answer', sdp: local.sdp },
-          });
-        }
+        this.sendLocalDescription();
       }
       return;
     }
     if (!payload.candidate) return;
+    this.remoteCandidates.add(payload.candidate.candidate);
     const candidate: RTCIceCandidateInit = {
       candidate: payload.candidate.candidate,
       sdpMid: payload.candidate.sdpMid ?? null,
@@ -143,8 +195,22 @@ export class PeerLink {
     try {
       await this.pc.addIceCandidate(candidate);
     } catch {
-      // Individual candidates may be unusable (e.g. mDNS names); ICE continues with the rest.
+      // Individual candidates may be unusable (e.g. mDNS names, or a previous ICE
+      // generation after a restart); ICE continues with the rest.
     }
+  }
+
+  private sendLocalDescription(): void {
+    const local = this.pc.localDescription;
+    if (!local || this.closed) return;
+    this.signal({
+      kind: 'description',
+      description: { type: local.type === 'answer' ? 'answer' : 'offer', sdp: local.sdp },
+    });
+  }
+
+  private signal(payload: SignalPayload): void {
+    this.options.sendSignal({ ...payload, attempt: this.attempt });
   }
 
   /** Reports whether traffic flows directly between the devices or through a TURN relay. */
@@ -190,8 +256,8 @@ export class PeerLink {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.clearConnectTimer();
-    if (this.graceTimer) clearTimeout(this.graceTimer);
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
     this.pc.onicecandidate = null;
     this.pc.onconnectionstatechange = null;
     this.pc.oniceconnectionstatechange = null;
@@ -203,35 +269,103 @@ export class PeerLink {
     this.pc.close();
   }
 
-  private handleState(state: RTCPeerConnectionState): void {
+  private handleIceState(state: RTCIceConnectionState): void {
     if (this.closed) return;
-    if (state === 'connected') {
-      if (this.graceTimer) clearTimeout(this.graceTimer);
-      this.graceTimer = null;
+    if (state === 'connected' || state === 'completed') {
+      this.clearTimer('grace');
+      if (this.reconnecting) this.recovered();
     } else if (state === 'disconnected') {
-      // Often transient (Wi-Fi hiccup, network switch); give ICE a moment to recover.
-      if (!this.graceTimer) {
-        this.graceTimer = setTimeout(() => {
-          this.graceTimer = null;
-          if (this.pc.connectionState !== 'connected')
-            this.fail(this.opened ? 'lost' : 'ice-failed');
-        }, this.options.disconnectGraceMs ?? 8_000);
+      if (this.opened) {
+        this.beginReconnect();
+      } else if (!this.timers.has('grace')) {
+        // Before anything opened, a short "disconnected" is usually a Wi-Fi hiccup.
+        this.setTimer('grace', this.options.disconnectGraceMs ?? 8_000, () => {
+          const ice = this.pc.iceConnectionState;
+          if (ice !== 'connected' && ice !== 'completed') this.fail('ice-failed');
+        });
       }
     } else if (state === 'failed') {
-      this.fail(this.opened ? 'lost' : 'ice-failed');
+      if (!this.opened) {
+        this.fail('ice-failed');
+        return;
+      }
+      this.beginReconnect();
+      this.restartIce();
     }
+  }
+
+  private beginReconnect(): void {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    this.restartsThisDrop = 0;
+    this.options.onReconnecting?.(true);
+    this.setTimer('reconnect', this.options.reconnectWindowMs ?? 25_000, () => this.fail('lost'));
+    if (this.options.isOfferer) {
+      this.setTimer('restart', this.options.restartDelayMs ?? 2_500, () => this.restartIce());
+    }
+    // The answering side waits for the offerer's restart offer (see applySignal).
+  }
+
+  private recovered(): void {
+    this.reconnecting = false;
+    this.clearTimer('reconnect');
+    this.clearTimer('restart');
+    this.options.onReconnecting?.(false);
+  }
+
+  /** Offerer: renegotiates ICE (new credentials and candidates) on the same connection. */
+  private restartIce(): void {
+    if (this.closed || !this.reconnecting || !this.options.isOfferer || this.restartInFlight)
+      return;
+    this.clearTimer('restart');
+    if (this.restartsThisDrop >= MAX_RESTARTS_PER_DROP) return; // the reconnect window decides
+    if (this.pc.signalingState !== 'stable' || this.pc.iceConnectionState === 'checking') {
+      // The previous restart is still waiting for its answer or running its checks.
+      this.setTimer('restart', 1_000, () => this.restartIce());
+      return;
+    }
+    this.restartsThisDrop += 1;
+    this.restarts += 1;
+    this.restartInFlight = true;
+    this.signalChain = this.signalChain
+      .then(async () => {
+        if (this.closed) return;
+        const offer = await this.pc.createOffer({ iceRestart: true });
+        await this.pc.setLocalDescription(offer);
+        this.sendLocalDescription();
+      })
+      .catch(() => {
+        // The reconnect window still bounds how long we wait.
+      })
+      .finally(() => {
+        this.restartInFlight = false;
+      });
+    this.setTimer('restart', RESTART_RETRY_MS, () => this.restartIce());
   }
 
   private fail(kind: 'lost' | PeerFailure): void {
     if (this.closed) return;
     const opened = this.opened;
+    const diagnostics = this.diagnostics();
     this.close();
     if (kind === 'lost' || opened) this.options.onLost();
-    else this.options.onFailed(kind);
+    else this.options.onFailed(kind, diagnostics);
   }
 
-  private clearConnectTimer(): void {
-    if (this.connectTimer) clearTimeout(this.connectTimer);
-    this.connectTimer = null;
+  private setTimer(name: TimerName, ms: number, callback: () => void): void {
+    this.clearTimer(name);
+    this.timers.set(
+      name,
+      setTimeout(() => {
+        this.timers.delete(name);
+        callback();
+      }, ms),
+    );
+  }
+
+  private clearTimer(name: TimerName): void {
+    const timer = this.timers.get(name);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(name);
   }
 }

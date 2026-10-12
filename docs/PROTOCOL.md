@@ -16,18 +16,18 @@ JSON text frames only (binary frames are rejected). Max message size `WS_MAX_MES
 
 ### Client → server
 
-| Message                                                                                   | Purpose                                                                                                                                |
-| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `{type:"create-session", role:"sender"\|"receiver", device:{label}}`                      | Host creates a session.                                                                                                                |
-| `{type:"join-session", target:{via:"link",sessionId}\|{via:"code",code}, device:{label}}` | Guest joins with the QR/link capability or the 6-character code.                                                                       |
-| `{type:"approve-peer"}` / `{type:"decline-peer"}`                                         | Host decides about a device that joined **by code** while the host is **sending**.                                                     |
-| `{type:"signal", payload}`                                                                | Relayed to the other member once paired. `payload` is `{kind:"description",description:{type,sdp}}` or `{kind:"candidate",candidate}`. |
-| `{type:"leave-session"}`                                                                  | Leave explicitly (closing the socket does the same).                                                                                   |
-| `{type:"ping"}`                                                                           | Liveness; answered with `pong`.                                                                                                        |
+| Message                                                                                   | Purpose                                                                                                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `{type:"create-session", role:"sender"\|"receiver", device:{label}}`                      | Host creates a session.                                                                                                                                                                                                                          |
+| `{type:"join-session", target:{via:"link",sessionId}\|{via:"code",code}, device:{label}}` | Guest joins with the QR/link capability or the 6-character code.                                                                                                                                                                                 |
+| `{type:"approve-peer"}` / `{type:"decline-peer"}`                                         | Host decides about a device that joined **by code** while the host is **sending**.                                                                                                                                                               |
+| `{type:"signal", payload}`                                                                | Relayed to the other member once paired. `payload` is `{kind:"description",description:{type,sdp},attempt?}`, `{kind:"candidate",candidate,attempt?}` or `{kind:"retry",attempt}` (see [Connection attempts](#connection-attempts-and-repairs)). |
+| `{type:"leave-session"}`                                                                  | Leave explicitly (closing the socket does the same).                                                                                                                                                                                             |
+| `{type:"ping"}`                                                                           | Liveness; answered with `pong`.                                                                                                                                                                                                                  |
 
 ### Server → client
 
-`session-created` (id, code, role, `expiresAt`, `iceServers`), `session-joined` (role, host device, `awaitingApproval`, `iceServers`), `peer-joined` (device, `via`, `needsApproval`), `peer-approved`, `peer-declined`, `signal`, `peer-left`, `session-expired`, `session-closed` (`lifetime-exceeded` \| `server-shutdown`), `error` (`invalid-message`, `rate-limited`, `session-not-found`, `session-expired`, `session-full`, `already-in-session`, `not-in-session`, `not-allowed`, `server-busy`, `internal`), `pong`.
+`session-created` (id, code, role, `expiresAt`, `iceServers`), `session-joined` (role, host device, `awaitingApproval`, `iceServers`), `peer-joined` (device, `via`, `needsApproval`), `peer-approved`, `peer-declined`, `signal`, `peer-left` (`reason`: `left` when the other device left on purpose — leave message, page closed, WebSocket close code 1000/1001, disconnect beacon; `gone` when it went silent — presence lapsed, connection dropped), `session-expired`, `session-closed` (`lifetime-exceeded` \| `server-shutdown`), `error` (`invalid-message`, `rate-limited`, `session-not-found`, `session-expired`, `session-full`, `already-in-session`, `not-in-session`, `not-allowed`, `server-busy`, `internal`), `pong`.
 
 ### Session lifecycle (server)
 
@@ -51,20 +51,29 @@ any ──SESSION_MAX_LIFETIME──▶ destroyed (session-closed)
 
 On serverless hosts (`SIGNALING_TRANSPORT=http`; the default on Vercel) the same messages travel over plain HTTP. `/api/config` tells the browser which transport to use (`quickTransfer.signaling`).
 
-| Request                                                               | Purpose                                                                                               |
-| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `POST /api/signal/connect` → `201 {connectionId, token}`              | Opens a connection. `token` is 256-bit random; the server keeps only its SHA-256.                     |
-| `POST /api/signal/send` (body: a client message) → `{messages}`       | Handles one message and returns anything already queued for this connection.                          |
-| `GET /api/signal/poll` → `{messages}`                                 | Returns and clears the connection's inbox, after applying expiry and departure rules.                 |
-| `POST /api/signal/disconnect` (body: `{connectionId, token}`) → `204` | Leaves for good. Sent with `navigator.sendBeacon` on `pagehide`, so the body carries the credentials. |
+| Request                                                                   | Purpose                                                                                               |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `POST /api/signal/connect` → `201 {connectionId, token}`                  | Opens a connection. `token` is 256-bit random; the server keeps only its SHA-256.                     |
+| `POST /api/signal/send` (body: a client message) → `{messages, firstSeq}` | Handles one message and returns anything queued for this connection.                                  |
+| `GET /api/signal/poll` → `{messages, firstSeq}`                           | Returns the connection's inbox, after applying expiry and departure rules.                            |
+| `POST /api/signal/disconnect` (body: `{connectionId, token}`) → `204`     | Leaves for good. Sent with `navigator.sendBeacon` on `pagehide`, so the body carries the credentials. |
 
 `send` and `poll` authenticate with `Authorization: Bearer <token>` and `X-Signal-Connection: <connectionId>`. `send` carries `X-Signal-Seq`, a per-connection message number: a retried request whose response was lost is not handled twice.
 
-Session state lives in Redis with a TTL on every key (connection, inbox, session, guest slot, approval flag, pairing code). There are no server timers: pairing expiry and a vanished peer are detected when the remaining device polls. A connection that hasn't polled for 150 s counts as gone, and the other device gets `peer-left`. The client polls every 0.4 s while messages flow, every 1.5 s while idle, and every 5 s once the data channel is open.
+**Acknowledged delivery.** Inbox messages are numbered per connection (message `i` of a response has number `firstSeq + i`) and stay queued until a later `send` or `poll` acknowledges them with `X-Signal-Ack: <number of the last message handled>`. A response lost on the way (a phone changing cells, an aborted request) is therefore delivered again, and the client skips numbers it already handled, so every message is handled exactly once, in order. In Redis, numbering + append and acknowledge + read are single Lua scripts, so concurrent writers can't reorder an inbox. Requests without the header (older pages) get the previous behaviour: returned messages are removed.
+
+Session state lives in Redis with a TTL on every key (connection, inbox, inbox counter, session, guest slot, approval flag, pairing code). There are no server timers: pairing expiry (also for a code join awaiting the host's approval) and a vanished peer are detected when a device polls. A connection that hasn't polled for 150 s counts as gone, and the other device gets `peer-left` with reason `gone`. The client polls every 0.4 s while messages flow, every 1.5 s while pairing, every 5 s after a failed attempt (for up to 5 minutes, so "Try again" still works) and every 15 s once the data channel is open (0.4 s again while a dropped connection is repaired).
 
 ### Who offers
 
 The **host** always creates the WebRTC offer; the guest answers. Remote ICE candidates arriving before the remote description are queued. Both sides create the same pre-negotiated data channel (`negotiated: true, id: 0, ordered`), so there is no `ondatachannel` race.
+
+### Connection attempts and repairs
+
+- **Attempts.** Every description and candidate carries `attempt` (absent = 0). After a failed attempt, **Try again** starts attempt n+1 over the same session, with a fresh `RTCPeerConnection` on both sides and no new code. The host starts it directly; a guest sends `{kind:"retry",attempt:n+1}` and the host answers with a new offer. Signals from an older attempt are dropped, and candidates that overtake their offer wait for it. At most `MAX_CONNECTION_ATTEMPTS` (6) attempts per session.
+- **Failure.** An attempt fails when ICE fails or nothing opens within 30 s. Both devices then classify the failure from the candidates each side gathered (no STUN configured · nothing from the other device · no public address here · none there · both public but incompatible, e.g. a strict NAT) and explain it.
+- **Repairs.** Once the data channel has opened, ICE `disconnected` (for 2.5 s) or `failed` makes the host send an ICE-restart offer (`iceRestart: true`) on the same connection; the guest answers it. The DTLS/SCTP association and the data channel stay open, so a transfer continues after a network change. At most two restarts per drop, within 25 s; after that the connection counts as lost.
+- **Signaling after connecting.** A working direct connection doesn't need signaling. `peer-left` with reason `gone` only closes signaling; the data channel reports a real departure (`bye`, channel close, ICE failing for good). `peer-left` with reason `left` ends the session right away.
 
 ---
 
@@ -121,7 +130,7 @@ sender                                receiver
 - The sender pauses whenever `bufferedAmount` exceeds 4 MiB and resumes at `bufferedamountlow` (threshold 1 MiB), with a polling fallback.
 - Sender progress shows bytes **acknowledged by the receiver**, not bytes queued locally.
 - The receiver folds chunks into `Blob`s every 8 MiB, so large files are handed to the browser's blob storage instead of piling up as JavaScript arrays. Blobs use `application/octet-stream`, never the peer-supplied MIME type.
-- Not implemented: resuming an interrupted transfer. A dropped connection fails the transfer cleanly and discards partial data.
+- A dropped network path is repaired underneath the data channel (ICE restart, see [Connection attempts and repairs](#connection-attempts-and-repairs)), so the transfer simply continues. Not implemented: resuming after the connection is lost for good; that fails the transfer cleanly and discards partial data.
 
 ---
 

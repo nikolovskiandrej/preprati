@@ -78,6 +78,8 @@ export async function buildApp(
     return503OnClosing: true,
   });
 
+  for (const warning of config.warnings) app.log.warn(warning);
+
   /* ----------------------------- Body parsing ------------------------------ */
   app.addContentTypeParser(
     'application/octet-stream',
@@ -97,7 +99,13 @@ export async function buildApp(
       callback(null, {
         origin: allowed,
         methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE'],
-        allowedHeaders: ['Authorization', 'Content-Type', 'X-Signal-Connection', 'X-Signal-Seq'],
+        allowedHeaders: [
+          'Authorization',
+          'Content-Type',
+          'X-Signal-Connection',
+          'X-Signal-Seq',
+          'X-Signal-Ack',
+        ],
         maxAge: 600,
         credentials: false,
       });

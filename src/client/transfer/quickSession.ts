@@ -11,9 +11,18 @@
  * Terminal/side phases: rejected, cancelled (connection stays up; another
  * transfer can follow), expired, disconnected, failed.
  *
+ * A failed connection attempt can be retried within the same session
+ * ("Try again", up to MAX_CONNECTION_ATTEMPTS): both devices stay paired and
+ * renegotiate from scratch as attempt n+1. Signals carry their attempt, so
+ * late messages from an abandoned attempt are dropped. Once the data channel
+ * is open, the connection no longer depends on signaling: drops are repaired
+ * with ICE restarts (see PeerLink) and the other device's departure is
+ * reported by the channel itself.
+ *
  * File names and contents only ever travel over the encrypted data channel;
  * the signaling server sees device labels and WebRTC negotiation only.
  */
+import { MAX_CONNECTION_ATTEMPTS } from '../../shared/constants';
 import { appUrl, isWebRtcAvailable, signalingUrl } from '../lib/env';
 import { loadPublicConfig } from '../lib/runtimeConfig';
 import { deviceLabel } from '../lib/device';
@@ -23,9 +32,17 @@ import type {
   JoinTarget,
   ServerMessage,
   SignalingErrorCode,
+  SignalPayload,
   TransferRole,
 } from '../../shared/signaling';
+import {
+  classifyFailure,
+  emptySummary,
+  type ConnectionDiagnostics,
+  type FailureCause,
+} from './diagnostics';
 import { TransferEngine, type ReceivedFile, type TransferSnapshot } from './engine';
+import { countIceServers, toRtcIceServers } from './iceConfig';
 import { PeerLink, type ConnectionRoute } from './peerLink';
 import { HttpSignalingClient } from './httpSignalingClient';
 import { SignalingClient, type SignalingTransport } from './signalingClient';
@@ -86,6 +103,8 @@ export interface QuickState {
   session: QuickSessionInfo | null;
   peer: { label: string; via: 'link' | 'code' | null } | null;
   route: ConnectionRoute | null;
+  /** The direct connection dropped and is being repaired. */
+  reconnecting: boolean;
   /** Files chosen by the sender that have not been offered yet. */
   pendingFiles: File[];
   transfer: TransferSnapshot | null;
@@ -94,6 +113,10 @@ export interface QuickState {
   /** Files received during this session (receiver side). */
   received: ReceivedFile[];
   error: QuickErrorCode | null;
+  /** Why the last connection attempt failed (set with `error: 'connection-failed'`). */
+  failure: { cause: FailureCause; diagnostics: ConnectionDiagnostics } | null;
+  /** "Try again" can reconnect within this session, without a new code. */
+  canRetry: boolean;
 }
 
 export interface QuickSessionOptions {
@@ -112,12 +135,34 @@ const INITIAL: QuickState = {
   session: null,
   peer: null,
   route: null,
+  reconnecting: false,
   pendingFiles: [],
   transfer: null,
   rate: null,
   received: [],
   error: null,
+  failure: null,
+  canRetry: false,
 };
+
+/** Longest wait for the server to confirm a new or joined session. */
+const SETUP_TIMEOUT_MS = 20_000;
+/** After a failed attempt, how long "Try again" stays possible (signaling idles meanwhile). */
+const RETRY_WINDOW_MS = 5 * 60_000;
+/** A guest that asked for another attempt waits this long for the host's new offer. */
+const RETRY_WAIT_MS = 30_000;
+
+/** Every field that describes one connection, reset whenever a new one starts. */
+const FRESH_CONNECTION = {
+  route: null,
+  reconnecting: false,
+  error: null,
+  failure: null,
+} satisfies Partial<QuickState>;
+
+const attemptOf = (payload: SignalPayload): number => payload.attempt ?? 0;
+
+type SessionTimer = 'setup' | 'retry-window' | 'retry-wait';
 
 function mapSignalingError(code: SignalingErrorCode): QuickErrorCode {
   switch (code) {
@@ -140,12 +185,16 @@ export class QuickSession {
   private peerLink: PeerLink | null = null;
   private engine: TransferEngine | null = null;
   private iceServers: IceServerConfig[] = [];
-  private pendingSignals: ServerMessage[] = [];
+  /** Signals that arrived before the peer connection they belong to exists. */
+  private pendingSignals: SignalPayload[] = [];
   private peerSaidBye = false;
   private disposed = false;
   private readonly meter = new RateMeter();
   private meterTransferId: string | null = null;
   private generation = 0;
+  /** Current connection attempt (0, then +1 per "Try again"). */
+  private attempt = 0;
+  private readonly timers = new Map<SessionTimer, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly options: QuickSessionOptions = {}) {}
 
@@ -172,12 +221,13 @@ export class QuickSession {
     }
     const generation = this.resetConnection();
     this.update(
-      { isHost: true, role, session: null, peer: null, route: null, transfer: null, error: null },
+      { ...FRESH_CONNECTION, isHost: true, role, session: null, peer: null, transfer: null },
       'creating-session',
     );
     const client = await this.openSignaling(generation);
     if (!client) return;
     client.send({ type: 'create-session', role, device: { label: deviceLabel() } });
+    this.armSetupTimeout(generation, 'creating-session');
   }
 
   /** Joins a session from a link (session id) or a typed pairing code. */
@@ -188,20 +238,13 @@ export class QuickSession {
     }
     const generation = this.resetConnection();
     this.update(
-      {
-        isHost: false,
-        role: null,
-        session: null,
-        peer: null,
-        route: null,
-        transfer: null,
-        error: null,
-      },
+      { ...FRESH_CONNECTION, isHost: false, role: null, session: null, peer: null, transfer: null },
       'joining',
     );
     const client = await this.openSignaling(generation);
     if (!client) return;
     client.send({ type: 'join-session', target, device: { label: deviceLabel() } });
+    this.armSetupTimeout(generation, 'joining');
   }
 
   approvePeer(): void {
@@ -215,6 +258,42 @@ export class QuickSession {
     if (this.linkPhase !== 'approval-required') return;
     this.signaling?.send({ type: 'decline-peer' });
     this.update({ peer: null }, 'waiting-for-peer');
+  }
+
+  /**
+   * After a failed attempt: reconnects the same two devices without a new
+   * code. The host renegotiates right away; a guest asks the host to.
+   */
+  retryConnection(): void {
+    if (!this.state.canRetry || !this.signaling) return;
+    this.clearTimer('retry-window');
+    const next = this.attempt + 1;
+    if (this.state.isHost) {
+      this.startAttempt(next);
+      return;
+    }
+    // Only the host offers, so ask it for the next attempt and wait for its offer.
+    this.releasePeer();
+    this.signaling.setPace?.('normal');
+    this.signaling.send({ type: 'signal', payload: { kind: 'retry', attempt: next } });
+    this.update(FRESH_CONNECTION, 'connecting');
+    const generation = this.generation;
+    this.setTimer('retry-wait', RETRY_WAIT_MS, () => {
+      if (generation !== this.generation || this.peerLink || this.linkPhase !== 'connecting')
+        return;
+      // Nothing came back from the host: report it like an attempt that heard nothing.
+      const servers = countIceServers(toRtcIceServers(this.iceServers));
+      this.connectionFailed({
+        attempt: next,
+        stunServers: servers.stun,
+        turnServers: servers.turn,
+        local: emptySummary(),
+        remote: emptySummary(),
+        iceStates: [],
+        durationMs: RETRY_WAIT_MS,
+        restarts: 0,
+      });
+    });
   }
 
   /** Sender: replaces the selection that will be offered next. */
@@ -282,9 +361,12 @@ export class QuickSession {
     client.onClose(() => {
       if (generation !== this.generation) return;
       this.signaling = null;
-      // Once the data channel is up, the transfer no longer needs signaling.
-      if (this.engine && this.peerLink) return;
-      if (this.isTerminal()) return;
+      // A peer connection in progress may still finish (its candidates may all be
+      // exchanged), and an open one no longer needs signaling at all.
+      if (this.peerLink || this.isTerminal()) {
+        this.update({}); // "Try again" needs signaling: refresh canRetry
+        return;
+      }
       this.update({ error: 'signaling-unavailable' }, 'failed');
     });
     return client;
@@ -300,6 +382,7 @@ export class QuickSession {
   private handleServerMessage(message: ServerMessage): void {
     switch (message.type) {
       case 'session-created':
+        this.clearTimer('setup');
         this.iceServers = message.iceServers;
         this.update(
           {
@@ -315,6 +398,7 @@ export class QuickSession {
         );
         return;
       case 'session-joined':
+        this.clearTimer('setup');
         this.iceServers = message.iceServers;
         this.update(
           { role: message.role, peer: { label: message.peer.label, via: null } },
@@ -338,12 +422,26 @@ export class QuickSession {
         this.update({ error: 'declined' }, 'failed');
         return;
       case 'signal':
-        if (this.peerLink) void this.peerLink.handleSignal(message.payload);
-        else this.pendingSignals.push(message);
+        this.routeSignal(message.payload);
         return;
       case 'peer-left':
         if (this.linkPhase === 'approval-required') {
           this.update({ peer: null }, 'waiting-for-peer');
+          return;
+        }
+        if (message.reason === 'gone' && this.peerLink?.isOpen) {
+          // The other device went quiet on the signaling side (a phone that put the page in
+          // the background, a dropped server connection), but the direct connection works
+          // without signaling and reports a real departure itself (`bye`, the channel
+          // closing, or ICE failing for good).
+          this.closeSignaling();
+          this.update({});
+          return;
+        }
+        if (this.linkPhase === 'failed' && this.state.error === 'connection-failed') {
+          // Nobody is left to retry with; keep explaining the failure itself.
+          this.closeSignaling();
+          this.update({});
           return;
         }
         this.handlePeerGone();
@@ -354,7 +452,10 @@ export class QuickSession {
         return;
       case 'session-closed':
         this.closeSignaling();
-        if (this.engine && this.peerLink) return; // the direct connection carries on
+        if (this.peerLink?.isOpen) {
+          this.update({});
+          return; // the direct connection carries on
+        }
         this.update(
           {
             error:
@@ -374,12 +475,57 @@ export class QuickSession {
   private handleSignalingError(code: SignalingErrorCode): void {
     // Errors while setting up are fatal; later ones (e.g. a dropped relay) are not.
     if (this.linkPhase === 'creating-session' || this.linkPhase === 'joining') {
+      this.clearTimer('setup');
       this.closeSignaling();
       this.update(
         { error: mapSignalingError(code) },
         code === 'session-expired' ? 'expired' : 'failed',
       );
     }
+  }
+
+  /** Hands a signal to the peer connection of its attempt (or keeps it until that exists). */
+  private routeSignal(payload: SignalPayload): void {
+    if (payload.kind === 'retry') {
+      // A guest asks for another attempt; the host decides the attempt numbers.
+      if (
+        this.state.isHost &&
+        payload.attempt > this.attempt &&
+        this.canStartAttempt(payload.attempt)
+      )
+        this.startAttempt(payload.attempt);
+      return;
+    }
+    const attempt = attemptOf(payload);
+    if (attempt < this.attempt) return; // from an abandoned attempt
+    if (this.state.isHost) {
+      if (attempt === this.attempt) void this.peerLink?.handleSignal(payload);
+      return;
+    }
+    const isOffer = payload.kind === 'description' && payload.description.type === 'offer';
+    if (isOffer && (attempt > this.attempt || !this.peerLink) && this.canStartAttempt(attempt)) {
+      // The host started a new attempt (after "Try again" on either device).
+      this.startAttempt(attempt, payload);
+      return;
+    }
+    if (attempt === this.attempt && this.peerLink) void this.peerLink.handleSignal(payload);
+    else this.pendingSignals.push(payload);
+  }
+
+  private canStartAttempt(attempt: number): boolean {
+    return attempt < MAX_CONNECTION_ATTEMPTS && !!this.state.peer && !this.engine?.busy;
+  }
+
+  /** Replaces the current peer connection with a fresh negotiation as `attempt`. */
+  private startAttempt(attempt: number, offer?: SignalPayload): void {
+    this.releasePeer();
+    this.clearTimer('retry-window');
+    this.clearTimer('retry-wait');
+    this.attempt = attempt;
+    this.signaling?.setPace?.('normal');
+    this.update(FRESH_CONNECTION, 'peer-connected');
+    this.startPeer(this.state.isHost);
+    if (offer) void this.peerLink?.handleSignal(offer);
   }
 
   /* ------------------------------------------------------------------------ */
@@ -403,7 +549,7 @@ export class QuickSession {
         if (generation !== this.generation) return;
         switch (event.type) {
           case 'ready':
-            this.signaling?.setQuiet?.(true);
+            this.signaling?.setPace?.('quiet');
             this.update({}, 'connected');
             void link.route().then((route) => {
               if (generation === this.generation) this.update({ route });
@@ -440,8 +586,11 @@ export class QuickSession {
       },
     });
     this.update({}, 'connecting');
-    for (const message of this.pendingSignals.splice(0)) {
-      if (message.type === 'signal') void link.handleSignal(message.payload);
+    // Signals that arrived early: apply this attempt's, keep any for a later one.
+    const early = this.pendingSignals;
+    this.pendingSignals = early.filter((payload) => attemptOf(payload) > this.attempt);
+    for (const payload of early) {
+      if (attemptOf(payload) === this.attempt) void link.handleSignal(payload);
     }
     link.start().catch(() => {
       if (generation === this.generation) {
@@ -452,23 +601,51 @@ export class QuickSession {
   }
 
   private createPeerLink(isOfferer: boolean, generation: number): PeerLink {
+    const attempt = this.attempt;
+    const current = () => generation === this.generation && attempt === this.attempt;
     return new PeerLink({
       iceServers: this.iceServers,
       isOfferer,
+      attempt,
       sendSignal: (payload) => this.signaling?.send({ type: 'signal', payload }),
       onOpen: () => {
-        if (generation !== this.generation) return;
+        if (!current()) return;
         this.engine?.start();
       },
-      onFailed: () => {
-        if (generation !== this.generation) return;
-        this.update({ error: 'connection-failed' }, 'failed');
+      onFailed: (_reason, diagnostics) => {
+        if (!current()) return;
         this.releasePeer();
+        this.connectionFailed(diagnostics);
       },
       onLost: () => {
-        if (generation !== this.generation) return;
+        if (!current()) return;
         this.handlePeerGone();
       },
+      onReconnecting: (reconnecting) => {
+        if (!current()) return;
+        // Restart offers and answers should travel fast; afterwards signaling idles again.
+        this.signaling?.setPace?.(reconnecting ? 'normal' : 'quiet');
+        this.update({ reconnecting });
+      },
+    });
+  }
+
+  /** Reports a failed attempt and keeps signaling (slowly) for a possible "Try again". */
+  private connectionFailed(diagnostics: ConnectionDiagnostics): void {
+    this.update(
+      {
+        ...FRESH_CONNECTION,
+        error: 'connection-failed',
+        failure: { cause: classifyFailure(diagnostics), diagnostics },
+      },
+      'failed',
+    );
+    this.signaling?.setPace?.('standby');
+    const generation = this.generation;
+    this.setTimer('retry-window', RETRY_WINDOW_MS, () => {
+      if (generation !== this.generation || this.linkPhase !== 'failed') return;
+      this.closeSignaling();
+      this.update({});
     });
   }
 
@@ -481,7 +658,7 @@ export class QuickSession {
         : 'peer-left';
     this.releasePeer();
     this.closeSignaling();
-    this.update({ error }, 'disconnected');
+    this.update({ error, reconnecting: false }, 'disconnected');
   }
 
   private maybeAutoOffer(): void {
@@ -506,15 +683,44 @@ export class QuickSession {
     this.teardown(false);
     this.peerSaidBye = false;
     this.pendingSignals = [];
+    this.attempt = 0;
     this.generation += 1;
     return this.generation;
   }
 
   private teardown(sayGoodbye: boolean): void {
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
     if (sayGoodbye) this.engine?.sayGoodbye();
     if (this.signaling?.isOpen) this.signaling.send({ type: 'leave-session' });
     this.releasePeer();
     this.closeSignaling();
+  }
+
+  /** Fails a session that the server never confirmed. */
+  private armSetupTimeout(generation: number, phase: 'creating-session' | 'joining'): void {
+    this.setTimer('setup', SETUP_TIMEOUT_MS, () => {
+      if (generation !== this.generation || this.linkPhase !== phase) return;
+      this.closeSignaling();
+      this.update({ error: 'signaling-unavailable' }, 'failed');
+    });
+  }
+
+  private setTimer(name: SessionTimer, ms: number, callback: () => void): void {
+    this.clearTimer(name);
+    this.timers.set(
+      name,
+      setTimeout(() => {
+        this.timers.delete(name);
+        callback();
+      }, ms),
+    );
+  }
+
+  private clearTimer(name: SessionTimer): void {
+    const timer = this.timers.get(name);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(name);
   }
 
   private releasePeer(): void {
@@ -534,6 +740,11 @@ export class QuickSession {
     if (linkPhase) this.linkPhase = linkPhase;
     const next: QuickState = { ...this.state, ...patch };
     next.phase = derivePhase(this.linkPhase, next.transfer);
+    next.canRetry =
+      this.linkPhase === 'failed' &&
+      next.error === 'connection-failed' &&
+      !!this.signaling?.isOpen &&
+      this.attempt + 1 < MAX_CONNECTION_ATTEMPTS;
     this.state = next;
     for (const listener of [...this.listeners]) listener();
   }

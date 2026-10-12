@@ -4,7 +4,7 @@ preprati. is **one Node process** that serves the frontend, the HTTP API and the
 
 1. **HTTPS and WSS.** Browsers allow Web Crypto (Share Files) and the async Clipboard API (Copy QR Code) only in secure contexts, and phones expect HTTPS. Terminate TLS in a reverse proxy that supports WebSocket upgrades.
 2. **Persistent storage** for Share Files: a persistent disk (`STORAGE_DRIVER=local`) or S3-compatible object storage (`STORAGE_DRIVER=s3`).
-3. Optionally a **TURN server** for networks where devices cannot connect directly.
+3. Optionally a **TURN server** for networks where devices cannot connect directly (off by default; see [CONNECTIVITY.md](CONNECTIVITY.md) for what works without one and what a relay costs).
 
 Static-only hosting (GitHub Pages, a CDN alone) cannot run the signaling server or the storage API. For serverless hosting, the same app has a **Vercel profile** (see [Vercel](#vercel)).
 
@@ -86,9 +86,9 @@ Recommendations:
 - Bandwidth: every share download passes through the server, so budget egress accordingly (e.g. 1 GB shared with 5 people ≈ 5 GB out).
 - Backups are unnecessary and undesirable: shares are temporary by design.
 
-## TURN (optional, recommended for a public service)
+## TURN (optional)
 
-Without TURN, devices on restrictive networks (symmetric NAT, some mobile carriers, corporate firewalls) cannot connect, and the app says so. With [coturn](https://github.com/coturn/coturn):
+Without TURN, devices on restrictive networks (symmetric NAT, some mobile carriers, corporate firewalls) cannot connect directly. The app explains why, offers "Try again" and lets the sender switch to a share link. A relay is off by default because it costs bandwidth; [CONNECTIVITY.md §6](CONNECTIVITY.md#6-turn-relay-optional-off-by-default) compares the options, including coturn on hardware you already own. With [coturn](https://github.com/coturn/coturn):
 
 ```ini
 # /etc/turnserver.conf
@@ -136,7 +136,7 @@ Function instances are short-lived and don't share memory, and two devices are n
 | Encrypted packages       | disk or S3                       | a **private** Vercel Blob store (or S3)                                 |
 | Expiry cleanup           | on every read + a timer (5 min)  | on every read + a sweep triggered by traffic (≤ 5 min) + the daily cron |
 
-Files still move directly between the two devices over WebRTC; only the small signaling messages use HTTP. The polling client sends its messages in order as numbered, idempotent requests, and checks its inbox every 0.4–1.5 s while pairing and every 5 s once the devices are connected.
+Files still move directly between the two devices over WebRTC; only the small signaling messages use HTTP. The polling client sends its messages in order as numbered, idempotent requests, and acknowledges what it received, so a response lost on a mobile network is delivered again. It checks its inbox every 0.4 s while messages flow, every 1.5 s while pairing, every 5 s after a failed attempt (for up to 5 minutes) and every 15 s once the devices are connected.
 
 ### Set up
 
@@ -166,8 +166,8 @@ Files still move directly between the two devices over WebRTC; only the small si
 - **Request bodies** are limited to 4.5 MB per function call ([limits](https://vercel.com/docs/functions/limitations)), so `SHARE_CHUNK_SIZE` must stay below that. 4 MB chunks keep a margin.
 - **Blob operations are metered** ([usage and pricing](https://vercel.com/docs/vercel-blob/usage-and-pricing)). On the Hobby plan, going over the included amount blocks the store for a while, so `BLOB_MONTHLY_WRITE_BUDGET` stops _new_ shares before the allowance runs out (the interface then reports storage as full). Each package costs one write per chunk plus two (manifest and the completeness check at finalize). Deleting is free. Each chunk download is one read.
 - **Cron jobs** run at most once a day on Hobby ([cron usage](https://vercel.com/docs/cron-jobs/usage-and-pricing)). Expiry itself is exact: the API refuses expired packages and deletes their data as soon as anyone asks for them, and any API traffic triggers a sweep of due packages from a Redis index (no storage listing). A package nobody touches after expiry, while the site has no traffic at all, is deleted by the next daily run. Until then it stays encrypted in the private store and unreachable through the API.
-- **Polling costs requests.** Every poll is a function invocation plus a few Redis commands. Check the invocation and Redis command allowances of your plans against expected traffic.
-- **No TURN relay is included.** Set `TURN_URLS` with `TURN_SECRET` (or `TURN_USERNAME`/`TURN_CREDENTIAL`) for networks where devices can't connect directly.
+- **Polling costs requests.** Every poll is a function invocation plus about 4 Redis commands: roughly 600 commands for a 10-minute session, against 500K a month on Upstash's free plan ([estimate](CONNECTIVITY.md#7-what-signaling-costs-on-the-free-plans)).
+- **No TURN relay is included.** Set `TURN_URLS` with `TURN_SECRET` (or `TURN_USERNAME`/`TURN_CREDENTIAL`) for networks where devices can't connect directly; read [CONNECTIVITY.md §6](CONNECTIVITY.md#6-turn-relay-optional-off-by-default) first.
 
 ## Local network testing (phones)
 
@@ -177,11 +177,13 @@ npm run dev:lan          # https://<your-LAN-IP>:5173 with a self-signed certifi
 
 Open the address on the phone and accept the certificate warning once (Web Crypto and clipboard need a secure context). Both devices must reach your computer; WebRTC then connects directly on the LAN.
 
+This tests one network only: devices elsewhere can't reach a signaling server on your computer. To test **across networks** (laptop on Wi-Fi, phone on mobile data), use a public deployment, or the Docker NAT lab. See [CONNECTIVITY.md §8](CONNECTIVITY.md#8-testing-across-networks).
+
 ## Checklist
 
 - [ ] HTTPS/WSS in front, `PUBLIC_ORIGIN` and `TRUST_PROXY` set
 - [ ] `STORAGE_DRIVER` chosen, volume/bucket persistent, quota sized
-- [ ] TURN configured (or accept that some networks cannot connect)
+- [ ] STUN reachable (default: Google + Cloudflare); TURN only if you accept its bandwidth or cost (otherwise some networks cannot connect directly and users are offered a share link)
 - [ ] `NOTEA_URL` set if the attribution should link somewhere
 - [ ] Proxy access logs don't record full paths (or are rotated quickly)
 - [ ] `/api/health` wired into your monitoring

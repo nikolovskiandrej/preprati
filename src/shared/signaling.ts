@@ -38,10 +38,27 @@ export const IceCandidateSchema = z.object({
   usernameFragment: z.string().max(256).nullable().optional(),
 });
 
+/**
+ * Connection attempt a payload belongs to (absent = 0, the first). "Try again"
+ * renegotiates from scratch as attempt n+1 over the same session, so late
+ * messages from an abandoned attempt can be recognised and dropped.
+ */
+const AttemptSchema = z.number().int().min(0).max(1_000);
+
 export const SignalPayloadSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('description'), description: SessionDescriptionSchema }),
+  z.object({
+    kind: z.literal('description'),
+    description: SessionDescriptionSchema,
+    attempt: AttemptSchema.optional(),
+  }),
   // `candidate: null` signals end-of-candidates.
-  z.object({ kind: z.literal('candidate'), candidate: IceCandidateSchema.nullable() }),
+  z.object({
+    kind: z.literal('candidate'),
+    candidate: IceCandidateSchema.nullable(),
+    attempt: AttemptSchema.optional(),
+  }),
+  /** The answering device asks the offering device (the host) to start attempt `attempt`. */
+  z.object({ kind: z.literal('retry'), attempt: AttemptSchema }),
 ]);
 export type SignalPayload = z.infer<typeof SignalPayloadSchema>;
 
@@ -135,7 +152,12 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('peer-approved') }),
   z.object({ type: z.literal('peer-declined') }),
   z.object({ type: z.literal('signal'), payload: SignalPayloadSchema }),
-  z.object({ type: z.literal('peer-left') }),
+  /**
+   * The other device is no longer in the session: it `left` on purpose (left the
+   * session, closed the page), or it is `gone` silent (stopped checking in, its
+   * connection dropped). A direct connection that still works can outlive `gone`.
+   */
+  z.object({ type: z.literal('peer-left'), reason: z.enum(['left', 'gone']).optional() }),
   z.object({ type: z.literal('session-expired') }),
   z.object({ type: z.literal('session-closed'), reason: SessionClosedReasonSchema }),
   z.object({

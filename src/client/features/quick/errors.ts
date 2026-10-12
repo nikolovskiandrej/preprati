@@ -1,4 +1,5 @@
 import type { MessageKey } from '../../i18n';
+import type { ConnectionDiagnostics, FailureCause } from '../../transfer/diagnostics';
 import type { TransferErrorCode } from '../../transfer/engine';
 import type { QuickErrorCode, QuickState } from '../../transfer/quickSession';
 
@@ -9,6 +10,8 @@ export interface QuickErrorView {
   message: MessageKey;
   hint?: MessageKey;
   recovery: Recovery;
+  /** Set when a connection attempt failed: "Try again", the share-link fallback and details. */
+  connection?: { canRetry: boolean; diagnostics: ConnectionDiagnostics | null };
 }
 
 const BY_CODE: Record<QuickErrorCode, Omit<QuickErrorView, 'recovery'>> = {
@@ -37,6 +40,15 @@ const BY_CODE: Record<QuickErrorCode, Omit<QuickErrorView, 'recovery'>> = {
   internal: { title: 'errors.titles.transfer', message: 'errors.internal' },
 };
 
+/** What went wrong with a failed connection attempt, in plain language. */
+const BY_CAUSE: Record<FailureCause, MessageKey> = {
+  'same-network-only': 'errors.connectionSameNetwork',
+  'no-remote-details': 'errors.connectionNoAnswer',
+  'local-network': 'errors.connectionLocalNetwork',
+  'remote-network': 'errors.connectionRemoteNetwork',
+  'incompatible-networks': 'errors.connectionIncompatible',
+};
+
 const BY_TRANSFER: Record<TransferErrorCode, Omit<QuickErrorView, 'recovery'>> = {
   'connection-lost': BY_CODE['connection-lost'],
   'protocol-error': BY_CODE['protocol-error'],
@@ -44,8 +56,15 @@ const BY_TRANSFER: Record<TransferErrorCode, Omit<QuickErrorView, 'recovery'>> =
   'peer-error': { title: 'errors.titles.transfer', message: 'errors.peerError' },
 };
 
-/** Describes the current failure (session-level or transfer-level) and how to recover. */
-export function describeQuickError(state: QuickState): QuickErrorView | null {
+/**
+ * Describes the current failure (session-level or transfer-level) and how to
+ * recover. `shareAvailable`: Share Files works on this server, so a failed
+ * direct connection can point to sending the files as a link instead.
+ */
+export function describeQuickError(
+  state: QuickState,
+  { shareAvailable = false }: { shareAvailable?: boolean } = {},
+): QuickErrorView | null {
   if (
     state.phase === 'expired' ||
     state.phase === 'disconnected' ||
@@ -53,7 +72,6 @@ export function describeQuickError(state: QuickState): QuickErrorView | null {
   ) {
     const code: QuickErrorCode =
       state.error ?? (state.transfer?.error === 'connection-lost' ? 'connection-lost' : 'internal');
-    const view = BY_CODE[code];
     const recovery: Recovery = state.isHost
       ? 'restart'
       : code === 'unsupported'
@@ -61,11 +79,35 @@ export function describeQuickError(state: QuickState): QuickErrorView | null {
         : code === 'session-not-found' || code === 'session-expired' || code === 'session-full'
           ? 'rejoin'
           : 'home';
-    return { ...view, recovery };
+    if (code === 'connection-failed')
+      return describeConnectionFailure(state, shareAvailable, recovery);
+    return { ...BY_CODE[code], recovery };
   }
   if (state.phase === 'failed' && state.transfer?.error) {
     // The connection is still up; only this transfer failed.
     return { ...BY_TRANSFER[state.transfer.error], recovery: 'retry-send' };
   }
   return null;
+}
+
+function describeConnectionFailure(
+  state: QuickState,
+  shareAvailable: boolean,
+  recovery: Recovery,
+): QuickErrorView {
+  const failure = state.failure;
+  const linkHint: MessageKey | undefined = !shareAvailable
+    ? undefined
+    : state.role === 'sender'
+      ? 'errors.connectionLinkSender'
+      : state.role === 'receiver'
+        ? 'errors.connectionLinkReceiver'
+        : undefined;
+  return {
+    title: 'errors.titles.connection',
+    message: failure ? BY_CAUSE[failure.cause] : 'errors.connectionFailed',
+    hint: linkHint ?? (failure ? undefined : 'errors.connectionFailedRelay'),
+    recovery,
+    connection: { canRetry: state.canRetry, diagnostics: failure?.diagnostics ?? null },
+  };
 }

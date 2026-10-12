@@ -6,16 +6,21 @@
  * as the WebSocket `SessionManager`, but keeps all state in a shared KvStore:
  *
  *   sig:c:<conn>   connection (token hash, IP, session membership) — TTL = presence window
- *   sig:i:<conn>   inbox of ServerMessages for that connection
+ *   sig:i:<conn>   inbox of numbered ServerMessages for that connection
+ *   sig:n:<conn>   the inbox's message counter
  *   sig:s:<id>     session (host, role, code, pairing deadline)    — TTL = max lifetime
  *   sig:g:<id>     guest slot, claimed atomically with SET NX
  *   sig:a:<id>     "approved" flag (paired)
  *   sig:k:<code>   pairing code → session id
  *   sig:q:<conn>:<n>  "message n already handled" (makes retried sends idempotent)
  *
- * Clients send messages with POST and fetch their inbox by polling. There are
- * no timers: pairing expiry and vanished peers are detected lazily when the
- * remaining device polls. Every key has a TTL, so abandoned state disappears.
+ * Clients send messages with POST and fetch their inbox by polling. Inbox
+ * messages are numbered and stay queued until the client acknowledges them
+ * (`ack` on its next request), so a response lost on a flaky mobile network
+ * is delivered again instead of silently dropping an offer or a candidate.
+ * There are no timers: pairing expiry and vanished peers are detected lazily
+ * when the remaining device polls. Every key has a TTL, so abandoned state
+ * disappears.
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { randomId, randomSecret } from '../../shared/encoding';
@@ -77,6 +82,7 @@ const hash = (token: string) => createHash('sha256').update(token).digest('hex')
 const K = {
   conn: (id: string) => `sig:c:${id}`,
   inbox: (id: string) => `sig:i:${id}`,
+  counter: (id: string) => `sig:n:${id}`,
   session: (id: string) => `sig:s:${id}`,
   guest: (id: string) => `sig:g:${id}`,
   approved: (id: string) => `sig:a:${id}`,
@@ -85,6 +91,12 @@ const K = {
   createdBy: (ip: string) => `sig:rl:create:${ip}`,
   joinFailures: (ip: string) => `sig:rl:join:${ip}`,
 };
+
+/** Inbox messages for one connection; message `i` has number `firstSeq + i`. */
+export interface InboxBatch {
+  messages: ServerMessage[];
+  firstSeq: number;
+}
 
 export class PollingSignaling {
   private readonly now: () => number;
@@ -159,21 +171,36 @@ export class PollingSignaling {
     }
   }
 
-  /** Lazily applies expiry/departure rules, then returns and clears the inbox. */
-  async poll(conn: ConnRecord): Promise<ServerMessage[]> {
+  /** Lazily applies expiry/departure rules, then reads the inbox (see `read`). */
+  async poll(conn: ConnRecord, ack: number | null = null): Promise<InboxBatch> {
     if (conn.sessionId) await this.checkSession(conn);
-    return this.drain(conn.id);
+    return this.read(conn.id, ack);
   }
 
-  /** Returns and clears the inbox without checking the session. */
-  drain(connectionId: string): Promise<ServerMessage[]> {
-    return this.kv.drain<ServerMessage>(K.inbox(connectionId));
+  /**
+   * Returns the inbox messages numbered above `ack` and forgets those up to
+   * it. Without an acknowledgement (older clients) returned messages are
+   * removed right away.
+   */
+  async read(connectionId: string, ack: number | null = null): Promise<InboxBatch> {
+    const { first, items } = await this.kv.inboxRead<ServerMessage>(
+      K.inbox(connectionId),
+      K.counter(connectionId),
+      ack,
+      INBOX_TTL_MS,
+    );
+    return { messages: items, firstSeq: first };
+  }
+
+  /** Queues an error for a connection (e.g. a message that failed validation). */
+  reportError(connectionId: string, code: SignalingErrorCode): Promise<void> {
+    return this.send(connectionId, { type: 'error', code });
   }
 
   /** The client is going away for good (tab closed, session ended). */
   async disconnect(conn: ConnRecord): Promise<void> {
     await this.leave(conn);
-    await this.kv.del(K.conn(conn.id), K.inbox(conn.id));
+    await this.kv.del(K.conn(conn.id), K.inbox(conn.id), K.counter(conn.id));
   }
 
   /* ------------------------------------------------------------------------ */
@@ -320,11 +347,11 @@ export class PollingSignaling {
     if (conn.id !== session.hostConn && !approved && guest?.conn === conn.id) {
       // A guest awaiting approval walked away: the next device may join.
       await this.kv.del(K.guest(session.id));
-      await this.send(session.hostConn, { type: 'peer-left' });
+      await this.send(session.hostConn, { type: 'peer-left', reason: 'left' });
       return;
     }
     const other = conn.id === session.hostConn ? guest?.conn : session.hostConn;
-    if (other) await this.send(other, { type: 'peer-left' });
+    if (other) await this.send(other, { type: 'peer-left', reason: 'left' });
     await this.destroy(session, guest);
   }
 
@@ -340,24 +367,27 @@ export class PollingSignaling {
       await this.saveConn({ ...conn, sessionId: null, role: null });
       return;
     }
+    // Until the devices are paired, the pairing deadline applies — also while a code join
+    // waits for the host's approval (the WebSocket SessionManager does the same with a timer).
+    if (!approved && this.now() >= session.pairingExpiresAt) {
+      await this.expire(session);
+      return;
+    }
     if (conn.id === session.hostConn) {
-      if (!guest) {
-        if (this.now() >= session.pairingExpiresAt) await this.expire(session);
-        return;
-      }
+      if (!guest) return;
       if (!(await this.kv.exists(K.conn(guest.conn)))) {
         if (approved) {
-          await this.send(conn.id, { type: 'peer-left' });
+          await this.send(conn.id, { type: 'peer-left', reason: 'gone' });
           await this.destroy(session, guest);
         } else {
           await this.removeGuest(session, guest);
-          await this.send(conn.id, { type: 'peer-left' });
+          await this.send(conn.id, { type: 'peer-left', reason: 'gone' });
         }
       }
       return;
     }
     if (!(await this.kv.exists(K.conn(session.hostConn)))) {
-      await this.send(conn.id, { type: 'peer-left' });
+      await this.send(conn.id, { type: 'peer-left', reason: 'gone' });
       await this.destroy(session, guest);
     }
   }
@@ -421,8 +451,8 @@ export class PollingSignaling {
     await this.kv.setJson(K.conn(record.id), record, { ttlMs: this.presenceTtlMs });
   }
 
-  private send(connectionId: string, message: ServerMessage): Promise<void> {
-    return this.kv.push(K.inbox(connectionId), [message], INBOX_TTL_MS);
+  private async send(connectionId: string, message: ServerMessage): Promise<void> {
+    await this.kv.inboxPush(K.inbox(connectionId), K.counter(connectionId), message, INBOX_TTL_MS);
   }
 
   private error(conn: ConnRecord, code: SignalingErrorCode): Promise<void> {

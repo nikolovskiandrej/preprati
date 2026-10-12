@@ -12,6 +12,7 @@ import { useI18n } from '../../i18n';
 import {
   CheckCircleIcon,
   CheckIcon,
+  ChevronDownIcon,
   ClockIcon,
   ConnectionIcon,
   DownloadIcon,
@@ -29,6 +30,7 @@ import {
   formatSpeed,
 } from '../../lib/format';
 import type { RateEstimate } from '../../lib/rateMeter';
+import type { CandidateSummary, ConnectionDiagnostics } from '../../transfer/diagnostics';
 import type { ReceivedFile, TransferSnapshot } from '../../transfer/engine';
 import type { ConnectionRoute } from '../../transfer/peerLink';
 import type { QuickSessionInfo } from '../../transfer/quickSession';
@@ -192,6 +194,82 @@ export function ApprovalPrompt({
         </Button>
       </div>
     </div>
+  );
+}
+
+/** "Connecting…", turning into a patience note when it takes a while (other networks, retries). */
+export function ConnectingStatus({ device }: { device: string }) {
+  const { t } = useI18n();
+  const [since] = useState(() => Date.now());
+  const now = useNow(1000);
+  return (
+    <StatusBlock
+      busy
+      title={t('quick.connecting', { device })}
+      detail={now - since > 8_000 ? t('quick.connectingSlow') : t('quick.connectingHint')}
+    />
+  );
+}
+
+/** Shown while a dropped connection is being repaired; the transfer resumes on its own. */
+export function ReconnectingNotice() {
+  const { t } = useI18n();
+  return (
+    <div className={styles.reconnecting} role="status">
+      <Spinner size={18} />
+      <div>
+        <p className={styles.reconnectingTitle}>{t('quick.reconnecting')}</p>
+        <p className={styles.note}>{t('quick.reconnectingHint')}</p>
+      </div>
+    </div>
+  );
+}
+
+/** What each side found while connecting, for people who want to know why (no addresses). */
+export function ConnectionDetails({ diagnostics }: { diagnostics: ConnectionDiagnostics }) {
+  const { t } = useI18n();
+  const describe = (summary: CandidateSummary, received: boolean) => {
+    if (!received) return t('quick.details.nothingReceived');
+    if (summary.srflx + summary.relay === 0) return t('quick.details.publicMissing');
+    return summary.strictNat
+      ? t('quick.details.publicFoundStrict')
+      : t('quick.details.publicFound');
+  };
+  const { local, remote } = diagnostics;
+  const rows: Array<[string, string]> = [
+    [t('quick.details.thisDevice'), describe(local, true)],
+    [
+      t('quick.details.otherDevice'),
+      describe(remote, remote.host + remote.srflx + remote.relay > 0),
+    ],
+    [
+      t('quick.details.relay'),
+      diagnostics.turnServers > 0
+        ? t('quick.details.relayAvailable')
+        : t('quick.details.relayNone'),
+    ],
+  ];
+  return (
+    <details className={styles.details}>
+      <summary>
+        <ChevronDownIcon size={16} className={styles.detailsChevron} />
+        {t('quick.details.title')}
+      </summary>
+      <dl className={styles.detailsList}>
+        {rows.map(([term, value]) => (
+          <div key={term}>
+            <dt>{term}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className={styles.note}>
+        {t('quick.details.attempt', {
+          number: diagnostics.attempt + 1,
+          seconds: Math.round(diagnostics.durationMs / 1000),
+        })}
+      </p>
+    </details>
   );
 }
 
@@ -362,6 +440,7 @@ export function TransferDone({ title, children }: { title: string; children?: Re
 
 export function QuickError({ view, actions }: { view: QuickErrorView; actions: ReactNode }) {
   const { t } = useI18n();
+  const diagnostics = view.connection?.diagnostics;
   return (
     <div className={styles.status}>
       <div className={styles.statusHead} role="alert">
@@ -375,6 +454,7 @@ export function QuickError({ view, actions }: { view: QuickErrorView; actions: R
         </div>
       </div>
       <div className={styles.buttons}>{actions}</div>
+      {diagnostics ? <ConnectionDetails diagnostics={diagnostics} /> : null}
     </div>
   );
 }

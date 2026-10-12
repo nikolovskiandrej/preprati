@@ -8,7 +8,8 @@
  * - UpstashKv: Redis over Upstash's REST API (works from serverless functions).
  *
  * Values are JSON. All operations used for coordination are atomic in Redis
- * (SET NX, INCRBY, LPOP count) so concurrent instances cannot double-claim.
+ * (SET NX, INCRBY, Lua scripts for the inbox) so concurrent instances cannot
+ * double-claim or reorder.
  */
 import type { Redis } from '@upstash/redis';
 
@@ -28,10 +29,26 @@ export interface KvStore {
   exists(key: string): Promise<boolean>;
   /** Sets a key's time to live. */
   expire(key: string, ttlMs: number): Promise<void>;
-  /** Appends JSON values to a list and refreshes its time to live. */
-  push(key: string, values: unknown[], ttlMs: number): Promise<void>;
-  /** Atomically removes and returns every element of a list. */
-  drain<T>(key: string): Promise<T[]>;
+  /**
+   * Appends a value to a sequenced inbox. It is numbered with the next value
+   * of `counterKey` atomically with the append, so numbers always follow list
+   * order, even with concurrent writers. Both keys get `ttlMs` to live.
+   */
+  inboxPush(key: string, counterKey: string, value: unknown, ttlMs: number): Promise<number>;
+  /**
+   * Reads a sequenced inbox. With `ack`, the highest number the reader has
+   * processed, entries up to it are removed and the remaining ones returned
+   * but kept until a later read acknowledges them: a response lost on the way
+   * to the reader is simply delivered again. `ack === null` removes everything
+   * it returns (for readers that do not acknowledge). `first` is the number of
+   * the first returned item (0 when there is none); numbers are consecutive.
+   */
+  inboxRead<T>(
+    key: string,
+    counterKey: string,
+    ack: number | null,
+    ttlMs: number,
+  ): Promise<{ first: number; items: T[] }>;
   /** Atomically adds `by` (may be negative); sets the TTL when the key is created. */
   incrBy(key: string, by: number, ttlMs?: number): Promise<number>;
   addToSet(key: string, member: string): Promise<void>;
@@ -50,7 +67,59 @@ interface MemoryEntry {
   expiresAt: number | null;
 }
 
-/** In-process store with Redis-like semantics (TTL, atomic list drain, counters). */
+interface InboxEntry {
+  seq: number;
+  value: unknown;
+}
+
+/**
+ * Inbox entries in Redis are "<number>|<json>". Numbering and appending happen
+ * in one script, so concurrent writers can never store numbers out of order.
+ * KEYS: inbox, counter. ARGV: json, ttl (ms).
+ */
+const INBOX_PUSH = `
+local n = redis.call('INCR', KEYS[2])
+redis.call('RPUSH', KEYS[1], n .. '|' .. ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+redis.call('PEXPIRE', KEYS[2], ARGV[2])
+return n`;
+
+/**
+ * Removes entries numbered up to the acknowledgement and returns the rest.
+ * KEYS: inbox, counter. ARGV: ack (-1 = remove everything returned), ttl (ms).
+ */
+const INBOX_READ = `
+local items = redis.call('LRANGE', KEYS[1], 0, -1)
+local ack = tonumber(ARGV[1])
+if ack < 0 then
+  if #items > 0 then redis.call('DEL', KEYS[1]) end
+  return items
+end
+local drop = 0
+for i = 1, #items do
+  local raw = items[i]
+  local sep = string.find(raw, '|', 1, true)
+  local seq = sep and tonumber(string.sub(raw, 1, sep - 1)) or 0 -- 0: written before numbering
+  if seq <= ack then drop = i else break end
+end
+if drop == #items then
+  if drop > 0 then redis.call('DEL', KEYS[1]) end
+elseif drop > 0 then
+  redis.call('LTRIM', KEYS[1], drop, -1)
+end
+redis.call('PEXPIRE', KEYS[2], ARGV[2])
+local rest = {}
+for i = drop + 1, #items do rest[#rest + 1] = items[i] end
+return rest`;
+
+function parseInboxEntry(raw: string): InboxEntry {
+  const numbered = /^(\d+)\|/.exec(raw);
+  return numbered
+    ? { seq: Number(numbered[1]), value: JSON.parse(raw.slice(numbered[0].length)) }
+    : { seq: 0, value: JSON.parse(raw) }; // written before inboxes were numbered
+}
+
+/** In-process store with Redis-like semantics (TTL, sequenced inbox, counters). */
 export class MemoryKv implements KvStore {
   readonly kind = 'memory' as const;
   private readonly data = new Map<string, MemoryEntry>();
@@ -111,18 +180,34 @@ export class MemoryKv implements KvStore {
     if (entry) entry.expiresAt = this.now() + ttlMs;
   }
 
-  async push(key: string, values: unknown[], ttlMs: number): Promise<void> {
+  async inboxPush(key: string, counterKey: string, value: unknown, ttlMs: number): Promise<number> {
+    const counter = this.live(counterKey);
+    const seq = (typeof counter?.value === 'number' ? counter.value : 0) + 1;
+    this.data.set(counterKey, { value: seq, expiresAt: this.now() + ttlMs });
     const entry = this.live(key);
-    const list = entry && Array.isArray(entry.value) ? (entry.value as unknown[]) : [];
-    list.push(...values.map((value) => structuredClone(value)));
+    const list = entry && Array.isArray(entry.value) ? (entry.value as InboxEntry[]) : [];
+    list.push({ seq, value: structuredClone(value) });
     this.data.set(key, { value: list, expiresAt: this.now() + ttlMs });
+    return seq;
   }
 
-  async drain<T>(key: string): Promise<T[]> {
+  async inboxRead<T>(
+    key: string,
+    counterKey: string,
+    ack: number | null,
+    ttlMs: number,
+  ): Promise<{ first: number; items: T[] }> {
     const entry = this.live(key);
-    if (!entry || !Array.isArray(entry.value)) return [];
-    this.data.delete(key);
-    return entry.value as T[];
+    const list = entry && Array.isArray(entry.value) ? (entry.value as InboxEntry[]) : [];
+    const rest = ack === null ? list : list.filter((item) => item.seq > ack);
+    if (entry && (ack === null || rest.length === 0)) this.data.delete(key);
+    else if (entry) entry.value = rest;
+    const counter = this.live(counterKey);
+    if (counter && ack !== null) counter.expiresAt = this.now() + ttlMs;
+    return {
+      first: rest[0]?.seq ?? 0,
+      items: rest.map((item) => structuredClone(item.value) as T),
+    };
   }
 
   async incrBy(key: string, by: number, ttlMs?: number): Promise<number> {
@@ -239,25 +324,32 @@ export class UpstashKv implements KvStore {
     await (await this.redis()).pexpire(key, Math.max(1, Math.ceil(ttlMs)));
   }
 
-  async push(key: string, values: unknown[], ttlMs: number): Promise<void> {
-    if (values.length === 0) return;
-    const pipeline = (await this.redis()).pipeline();
-    pipeline.rpush(key, ...values.map((value) => JSON.stringify(value)));
-    pipeline.pexpire(key, Math.max(1, Math.ceil(ttlMs)));
-    await pipeline.exec();
+  async inboxPush(key: string, counterKey: string, value: unknown, ttlMs: number): Promise<number> {
+    const result = await (
+      await this.redis()
+    ).eval(
+      INBOX_PUSH,
+      [key, counterKey],
+      [JSON.stringify(value), String(Math.max(1, Math.ceil(ttlMs)))],
+    );
+    return Number(result);
   }
 
-  async drain<T>(key: string): Promise<T[]> {
-    const redis = await this.redis();
-    const out: T[] = [];
-    for (;;) {
-      const batch = (await redis.lpop<string[]>(key, 100)) as string[] | string | null;
-      if (!batch) break;
-      const items = Array.isArray(batch) ? batch : [batch];
-      for (const item of items) out.push(JSON.parse(item) as T);
-      if (items.length < 100) break;
-    }
-    return out;
+  async inboxRead<T>(
+    key: string,
+    counterKey: string,
+    ack: number | null,
+    ttlMs: number,
+  ): Promise<{ first: number; items: T[] }> {
+    const raws = (await (
+      await this.redis()
+    ).eval(
+      INBOX_READ,
+      [key, counterKey],
+      [String(ack ?? -1), String(Math.max(1, Math.ceil(ttlMs)))],
+    )) as string[] | null;
+    const entries = (raws ?? []).map(parseInboxEntry);
+    return { first: entries[0]?.seq ?? 0, items: entries.map((entry) => entry.value as T) };
   }
 
   async incrBy(key: string, by: number, ttlMs?: number): Promise<number> {

@@ -4,7 +4,11 @@ import {
   PollingSignaling,
   type PollingConnection,
 } from '../../src/server/signaling/pollingSignaling';
-import type { ClientMessage, ServerMessage } from '../../src/shared/signaling';
+import {
+  ClientMessageSchema,
+  type ClientMessage,
+  type ServerMessage,
+} from '../../src/shared/signaling';
 
 const PAIRING_TTL = 60_000;
 const PRESENCE_TTL = 30_000;
@@ -25,7 +29,9 @@ describe('PollingSignaling', () => {
     return {
       ...credentials,
       send: async (message: ClientMessage) => signaling.handle(await auth(), message),
-      poll: async (): Promise<ServerMessage[]> => signaling.poll(await auth()),
+      poll: async (): Promise<ServerMessage[]> => (await signaling.poll(await auth())).messages,
+      /** Polls like current clients do: acknowledging what was processed so far. */
+      pollAck: async (ack: number) => signaling.poll(await auth(), ack),
       leave: async () => signaling.disconnect(await auth()),
     };
   };
@@ -194,6 +200,24 @@ describe('PollingSignaling', () => {
     expect(await late.poll()).toEqual([{ type: 'error', code: 'session-not-found' }]);
   });
 
+  it('expires a code join the host never answers, like the WebSocket server', async () => {
+    const { host, created } = await hostSession('sender');
+    const guest = await device();
+    await guest.send({
+      type: 'join-session',
+      target: { via: 'code', code: created.code },
+      device: label('Tablet'),
+    });
+    await guest.poll();
+    await host.poll();
+    // The pairing window (60 s here) is extended to a 2-minute approval window, then enforced.
+    const [hostSeen, guestSeen] = await advance(2 * 60_000, host, guest);
+    expect(hostSeen).toEqual([{ type: 'session-expired' }]);
+    expect(guestSeen).toEqual([{ type: 'session-expired' }]);
+    await host.send({ type: 'approve-peer' });
+    expect(await host.poll()).toEqual([{ type: 'error', code: 'not-in-session' }]);
+  });
+
   it('keeps a paired session alive past the pairing window', async () => {
     const { host, created } = await hostSession('receiver');
     const guest = await device();
@@ -220,7 +244,7 @@ describe('PollingSignaling', () => {
     now += PRESENCE_TTL - 1_000;
     expect(await host.poll()).toEqual([]);
     now += 2_000; // the guest's presence has lapsed, the host's was just refreshed
-    expect(await host.poll()).toEqual([{ type: 'peer-left' }]);
+    expect(await host.poll()).toEqual([{ type: 'peer-left', reason: 'gone' }]);
   });
 
   it('reports an explicit disconnect to the other device', async () => {
@@ -233,7 +257,7 @@ describe('PollingSignaling', () => {
     });
     await host.poll();
     await guest.leave();
-    expect(await host.poll()).toEqual([{ type: 'peer-left' }]);
+    expect(await host.poll()).toEqual([{ type: 'peer-left', reason: 'left' }]);
     expect(await signaling.authenticate(guest.connectionId, guest.token)).toBeNull();
   });
 
@@ -247,7 +271,7 @@ describe('PollingSignaling', () => {
     });
     await host.poll();
     await guest.send({ type: 'leave-session' });
-    expect(await host.poll()).toEqual([{ type: 'peer-left' }]);
+    expect(await host.poll()).toEqual([{ type: 'peer-left', reason: 'left' }]);
     const next = await device();
     await next.send({
       type: 'join-session',
@@ -295,6 +319,69 @@ describe('PollingSignaling', () => {
       { type: 'error', code: 'session-not-found' },
     ]);
     expect(replies[2]).toMatchObject({ type: 'error', code: 'rate-limited' });
+  });
+
+  it('keeps inbox messages until the client acknowledges them', async () => {
+    const { host, created } = await hostSession('receiver');
+    const guest = await device();
+    await guest.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Phone'),
+    });
+    const offer = {
+      kind: 'description' as const,
+      description: { type: 'offer' as const, sdp: 'v=0' },
+    };
+    await host.send({ type: 'signal', payload: offer });
+
+    // The response carrying these was "lost": nothing was acknowledged, so they come again.
+    const first = await guest.pollAck(0);
+    expect(first.firstSeq).toBe(1);
+    expect(first.messages.map((message) => message.type)).toEqual(['session-joined', 'signal']);
+    expect(await guest.pollAck(0)).toEqual(first);
+
+    // Acknowledging the first message removes only that one.
+    expect(await guest.pollAck(1)).toEqual({
+      firstSeq: 2,
+      messages: [{ type: 'signal', payload: offer }],
+    });
+    expect(await guest.pollAck(2)).toEqual({ firstSeq: 0, messages: [] });
+
+    // Numbering continues after everything was acknowledged.
+    await host.send({ type: 'signal', payload: { kind: 'candidate', candidate: null } });
+    expect(await guest.pollAck(2)).toEqual({
+      firstSeq: 3,
+      messages: [{ type: 'signal', payload: { kind: 'candidate', candidate: null } }],
+    });
+  });
+
+  it('relays connection attempts and retry requests unchanged', async () => {
+    const { host, created } = await hostSession('receiver');
+    const guest = await device();
+    await guest.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Phone'),
+    });
+    await guest.poll();
+    await host.poll();
+    const parse = (payload: unknown) =>
+      ClientMessageSchema.parse({ type: 'signal', payload }) as Extract<
+        ClientMessage,
+        { type: 'signal' }
+      >;
+    await guest.send(parse({ kind: 'retry', attempt: 1 }));
+    const offer = parse({
+      kind: 'description',
+      description: { type: 'offer', sdp: 'v=0' },
+      attempt: 1,
+    });
+    await host.send(offer);
+    expect(await host.poll()).toEqual([{ type: 'signal', payload: { kind: 'retry', attempt: 1 } }]);
+    expect(await guest.poll()).toEqual([{ type: 'signal', payload: offer.payload }]);
+    expect(() => parse({ kind: 'retry' })).toThrow();
+    expect(() => parse({ kind: 'candidate', candidate: null, attempt: -1 })).toThrow();
   });
 
   it('claims each message number only once', async () => {

@@ -172,9 +172,11 @@ export function registerSignalingRoute(
       }
     });
 
-    socket.on('close', () => {
+    socket.on('close', (code: number) => {
       live.delete(entry);
-      sessions.leave(peer);
+      // Browsers close with 1000/1001 when the page goes away; anything else is a dropped
+      // connection, which a working direct connection between the devices may outlive.
+      sessions.leave(peer, code === 1000 || code === 1001 ? 'left' : 'gone');
       const open = (openPerIp.get(ip) ?? 1) - 1;
       if (open <= 0) openPerIp.delete(ip);
       else openPerIp.set(ip, open);

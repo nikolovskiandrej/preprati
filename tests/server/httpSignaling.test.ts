@@ -162,7 +162,7 @@ describe('HTTP signaling routes', () => {
       body: JSON.stringify(guest),
     });
     expect(beacon.status).toBe(204);
-    expect(await poll(host)).toEqual([{ type: 'peer-left' }]);
+    expect(await poll(host)).toEqual([{ type: 'peer-left', reason: 'left' }]);
     expect((await fetch(`${server.url}/api/signal/poll`, { headers: headers(guest) })).status).toBe(
       401,
     );

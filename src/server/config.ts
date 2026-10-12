@@ -8,21 +8,20 @@
 import path from 'node:path';
 import { SHARE_CHUNK_MAX_BYTES, SHARE_CHUNK_MIN_BYTES } from '../shared/constants';
 import type { ShareUnavailableReason } from '../shared/shareApi';
+import {
+  DEFAULT_STUN_URLS,
+  iceWarnings,
+  validateIceUrls,
+  type IceConfig,
+  type TurnConfig,
+} from './signaling/ice';
 
 export type RuntimeEnv = 'development' | 'production' | 'test';
 export type StorageDriver = 'local' | 's3' | 'vercel-blob';
 export type SignalingTransport = 'websocket' | 'http';
 export type KvDriver = 'memory' | 'upstash';
 
-export interface TurnConfig {
-  urls: string[];
-  /** coturn `static-auth-secret` — enables short-lived HMAC credentials (preferred). */
-  secret: string | null;
-  /** Static long-term credentials (fallback when no shared secret is used). */
-  username: string | null;
-  credential: string | null;
-  credentialTtlSeconds: number;
-}
+export type { TurnConfig };
 
 export interface ServerConfig {
   env: RuntimeEnv;
@@ -47,10 +46,9 @@ export interface ServerConfig {
   staticDir: string;
   logLevel: string;
   attributionUrl: string | null;
-  ice: {
-    stunUrls: string[];
-    turn: TurnConfig | null;
-  };
+  ice: IceConfig;
+  /** Valid but noteworthy settings, logged once at startup. */
+  warnings: string[];
   sessions: {
     pairingTtlMs: number;
     maxLifetimeMs: number;
@@ -258,16 +256,12 @@ export function loadConfig(env: Env = process.env, version = '1.0.0'): ServerCon
   });
 
   /* ------------------------------- ICE / TURN ------------------------------ */
-  const turnUrls = readList(env, 'TURN_URLS', []);
-  for (const url of turnUrls) {
-    if (!/^turns?:/i.test(url))
-      throw new ConfigError(`TURN_URLS entries must start with turn: or turns:, got "${url}"`);
-  }
-  const stunUrls = readList(env, 'STUN_URLS', ['stun:stun.l.google.com:19302']);
-  for (const url of stunUrls) {
-    if (!/^stuns?:/i.test(url))
-      throw new ConfigError(`STUN_URLS entries must start with stun: or stuns:, got "${url}"`);
-  }
+  // An empty STUN_URLS ("") turns STUN off on purpose (same-network only, e.g. loopback tests).
+  const stun = validateIceUrls(readList(env, 'STUN_URLS', [...DEFAULT_STUN_URLS]), 'stun');
+  if (!stun.ok) throw new ConfigError(`STUN_URLS: ${stun.error}`);
+  const turnList = validateIceUrls(readList(env, 'TURN_URLS', []), 'turn');
+  if (!turnList.ok) throw new ConfigError(`TURN_URLS: ${turnList.error}`);
+  const turnUrls = turnList.urls;
   const turnSecret = read(env, 'TURN_SECRET') ?? null;
   const turnUsername = read(env, 'TURN_USERNAME') ?? null;
   const turnCredential = read(env, 'TURN_CREDENTIAL') ?? null;
@@ -288,6 +282,7 @@ export function loadConfig(env: Env = process.env, version = '1.0.0'): ServerCon
           ),
         }
       : null;
+  const ice: IceConfig = { stunUrls: stun.urls, turn };
 
   /* --------------------------------- Shares -------------------------------- */
   const shareEnabledFlag = readBool(env, 'SHARE_ENABLED', true);
@@ -375,7 +370,8 @@ export function loadConfig(env: Env = process.env, version = '1.0.0'): ServerCon
     staticDir: path.resolve(read(env, 'STATIC_DIR') ?? 'dist/client'),
     logLevel: read(env, 'LOG_LEVEL') ?? (runtimeEnv === 'test' ? 'silent' : 'info'),
     attributionUrl: readAttributionUrl(env),
-    ice: { stunUrls, turn },
+    ice,
+    warnings: iceWarnings(ice),
     sessions: {
       pairingTtlMs: readDuration(env, 'SESSION_PAIRING_TTL', 10 * MINUTE, 1000, DAY),
       maxLifetimeMs: readDuration(env, 'SESSION_MAX_LIFETIME', 12 * HOUR, MINUTE, 7 * DAY),

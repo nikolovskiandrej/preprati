@@ -11,23 +11,27 @@ import {
   RANDOM_ID_PATTERN,
 } from '../../shared/constants';
 import type { JoinTarget } from '../../shared/signaling';
+import { useConfig } from '../app/config';
 import { useLeaveWarning, useOwnedStore } from '../app/hooks';
 import { FlowHeader } from '../features/common/FlowHeader';
 import { describeQuickError } from '../features/quick/errors';
 import {
+  ConnectingStatus,
   ConnectionBadge,
   IncomingOffer,
   LivePanel,
   QuickError,
   ReceivedFilesList,
+  ReconnectingNotice,
   StatusBlock,
   TransferDone,
   TransferProgress,
 } from '../features/quick/panels';
 import { SelectedFilesPane } from '../features/common/SelectedFilesPane';
 import { useI18n } from '../i18n';
-import { DownloadIcon, ErrorIcon, SendIcon } from '../icons';
+import { DownloadIcon, ErrorIcon, LinkIcon, RetryIcon, SendIcon } from '../icons';
 import { localFileId, type SelectedFile } from '../lib/files';
+import { handOffFiles } from '../lib/handoff';
 import { QuickSession, type QuickState } from '../transfer/quickSession';
 import { Button } from '../ui/Button';
 import styles from './QuickScreens.module.css';
@@ -48,6 +52,8 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
   );
   const [files, setFiles] = useState<SelectedFile[]>([]);
   const [composing, setComposing] = useState(false);
+  const { config } = useConfig();
+  const shareAvailable = config?.share.enabled === true;
 
   const phase = state?.phase ?? 'idle';
   const role = state?.role ?? null;
@@ -95,23 +101,53 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
     if (!state || !session || phase === 'idle' || phase === 'joining') {
       return { key: 'joining', node: <StatusBlock busy title={t('join.joining')} /> };
     }
-    const error = describeQuickError(state);
+    const error = describeQuickError(state, { shareAvailable });
     if (error) {
+      const retry = error.connection?.canRetry === true;
+      const offerLink =
+        !!error.connection && shareAvailable && role === 'sender' && files.length > 0;
       const actions =
         error.recovery === 'retry-send' ? (
           <Button variant="primary" onClick={sendNow} disabled={files.length === 0}>
             {t('quick.sendAgain')}
           </Button>
-        ) : error.recovery === 'rejoin' ? (
-          <Button variant="primary" onClick={() => navigate('/join')}>
-            {t('quick.enterCode')}
-          </Button>
         ) : (
-          <Button variant="inverse" onClick={() => navigate('/')}>
-            {t('common.goHome')}
-          </Button>
+          <>
+            {retry ? (
+              <Button variant="primary" icon={RetryIcon} onClick={() => session.retryConnection()}>
+                {t('quick.tryAgain')}
+              </Button>
+            ) : null}
+            {offerLink ? (
+              <Button
+                variant={retry ? 'inverse' : 'primary'}
+                icon={LinkIcon}
+                onClick={() => {
+                  handOffFiles(files.map((entry) => entry.file));
+                  navigate('/share');
+                }}
+              >
+                {t('quick.sendAsLink')}
+              </Button>
+            ) : null}
+            {error.recovery === 'rejoin' ? (
+              <Button variant="primary" onClick={() => navigate('/join')}>
+                {t('quick.enterCode')}
+              </Button>
+            ) : (
+              <Button
+                variant={retry || offerLink ? 'ghost' : 'inverse'}
+                onClick={() => navigate('/')}
+              >
+                {t('common.goHome')}
+              </Button>
+            )}
+          </>
         );
-      return { key: `error-${error.message}`, node: <QuickError view={error} actions={actions} /> };
+      return {
+        key: `error-${error.message}-${retry}`,
+        node: <QuickError view={error} actions={actions} />,
+      };
     }
 
     const endButton = (
@@ -156,16 +192,7 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
         };
       case 'peer-connected':
       case 'connecting':
-        return {
-          key: 'connecting',
-          node: (
-            <StatusBlock
-              busy
-              title={t('quick.connecting', { device })}
-              detail={t('quick.connectingHint')}
-            />
-          ),
-        };
+        return { key: 'connecting', node: <ConnectingStatus device={device} /> };
       case 'connected':
         return role === 'sender'
           ? { key: 'compose', node: sendPanel }
@@ -315,7 +342,10 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
   return (
     <div className={styles.single}>
       <FlowHeader title={t('quick.joinTitle')} mode="quick" />
-      <LivePanel stateKey={live.key}>{live.node}</LivePanel>
+      <LivePanel stateKey={live.key}>
+        {state?.reconnecting ? <ReconnectingNotice /> : null}
+        {live.node}
+      </LivePanel>
       {showPicker || (role === 'sender' && files.length > 0) ? (
         <div className={styles.below}>
           <SelectedFilesPane

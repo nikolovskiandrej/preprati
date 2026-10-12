@@ -171,6 +171,24 @@ export const en = {
     youDeclined: 'You declined the files.',
     invalidLink: 'This connection link is incomplete. Check it, or enter the pairing code instead.',
     enterCode: 'Enter a code',
+    connectingSlow: 'Still trying… Devices on different networks can take up to half a minute.',
+    reconnecting: 'Connection interrupted. Reconnecting…',
+    reconnectingHint: 'Files keep moving as soon as the devices find each other again.',
+    tryAgain: 'Try again',
+    sendAsLink: 'Send as a link instead',
+    details: {
+      title: 'Connection details',
+      thisDevice: 'This device',
+      otherDevice: 'Other device',
+      relay: 'Relay server',
+      publicFound: 'Public address found',
+      publicFoundStrict: 'Public address found (strict NAT)',
+      publicMissing: 'No public address found',
+      nothingReceived: 'Nothing received',
+      relayNone: 'Not set up on this server',
+      relayAvailable: 'Set up',
+      attempt: 'Attempt {number}, stopped after {seconds} s',
+    },
   },
   join: {
     title: 'Join a transfer',
@@ -265,6 +283,19 @@ export const en = {
     connectionFailed:
       'The devices couldn’t connect directly. This can happen on strict networks (some offices, schools or mobile carriers).',
     connectionFailedRelay: 'Try both devices on the same Wi-Fi.',
+    connectionSameNetwork:
+      'This server only connects devices on the same network, so both devices need to be on the same Wi-Fi.',
+    connectionLocalNetwork:
+      'This device’s network blocks direct connections, as many office, school and public Wi-Fi networks do. Try another network, such as mobile data, or put both devices on the same Wi-Fi.',
+    connectionRemoteNetwork:
+      'The other device’s network blocks direct connections, as many office, school and public Wi-Fi networks do. Try it on another network, or put both devices on the same Wi-Fi.',
+    connectionNoAnswer:
+      'The other device didn’t answer in time. Check that its page is still open, then try again.',
+    connectionIncompatible:
+      'Both devices are online, but their networks don’t allow a direct connection between them. This often happens when one of them uses mobile data. Try both devices on the same Wi-Fi.',
+    connectionLinkSender: 'Or send the files as a link, which works on any network.',
+    connectionLinkReceiver:
+      'Or ask the sender to share the files as a link, which works on any network.',
     connectionLost: 'The connection was lost. Files that weren’t complete were discarded.',
     protocolError: 'The transfer stopped because the data didn’t match what was announced.',
     fileReadFailed: 'A file couldn’t be read. It may have been moved or changed — choose it again.',

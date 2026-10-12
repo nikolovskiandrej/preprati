@@ -34,6 +34,13 @@ export const PAIRING_CODE_PATTERN = new RegExp(
 /** Maximum length of the human-readable device label exchanged on join. */
 export const DEVICE_LABEL_MAX_LENGTH = 64;
 
+/**
+ * Connection attempts per Quick Transfer session: the first one plus the
+ * user's "Try again"s. Each attempt is a fresh WebRTC negotiation over the
+ * same signaling session; the cap keeps signaling traffic bounded.
+ */
+export const MAX_CONNECTION_ATTEMPTS = 6;
+
 /** Per-chunk overhead of the share format: 12-byte AES-GCM IV + 16-byte tag. */
 export const SHARE_CHUNK_IV_BYTES = 12;
 export const SHARE_CHUNK_TAG_BYTES = 16;

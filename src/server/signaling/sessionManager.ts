@@ -206,8 +206,12 @@ export class SessionManager {
     return { ok: true };
   }
 
-  /** Called on explicit leave and when a socket closes. Idempotent. */
-  leave(peer: SignalingPeer): void {
+  /**
+   * Called on explicit leave (`left`) and when a socket closes: `left` for a
+   * normal close (page closed, session ended), `gone` when it dropped.
+   * Idempotent.
+   */
+  leave(peer: SignalingPeer, reason: 'left' | 'gone' = 'left'): void {
     const session = this.byPeer.get(peer.connectionId);
     if (!session) return;
     const other = session.host === peer ? session.guest : session.host;
@@ -217,11 +221,11 @@ export class SessionManager {
       session.guest = null;
       session.guestDevice = null;
       session.state = 'waiting';
-      session.host.send({ type: 'peer-left' });
+      session.host.send({ type: 'peer-left', reason });
       if (this.now() >= session.pairingExpiresAt) this.expire(session);
       return;
     }
-    other?.send({ type: 'peer-left' });
+    other?.send({ type: 'peer-left', reason });
     this.destroy(session);
   }
 

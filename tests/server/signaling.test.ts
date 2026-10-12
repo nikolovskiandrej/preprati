@@ -98,6 +98,32 @@ describe('signaling WebSocket', () => {
     host.close();
   });
 
+  it('tells a page that closed apart from a connection that dropped', async () => {
+    const pairUp = async () => {
+      const host = await Client.connect(server.wsUrl);
+      const guest = await Client.connect(server.wsUrl);
+      host.send({ type: 'create-session', role: 'receiver', device: { label: 'Laptop' } });
+      const created = await host.next('session-created');
+      guest.send({
+        type: 'join-session',
+        target: { via: 'link', sessionId: created.sessionId },
+        device: { label: 'Phone' },
+      });
+      await host.next('peer-joined');
+      return { host, guest };
+    };
+
+    const closed = await pairUp();
+    closed.guest.socket.close(1001); // what browsers send when a page goes away
+    expect(await closed.host.next('peer-left')).toEqual({ type: 'peer-left', reason: 'left' });
+    closed.host.close();
+
+    const dropped = await pairUp();
+    dropped.guest.socket.terminate(); // no close frame: the network went away
+    expect(await dropped.host.next('peer-left')).toEqual({ type: 'peer-left', reason: 'gone' });
+    dropped.host.close();
+  });
+
   it('expires sessions that nobody joins (server-enforced)', async () => {
     const host = await Client.connect(server.wsUrl);
     host.send({ type: 'create-session', role: 'sender', device: { label: 'A' } });

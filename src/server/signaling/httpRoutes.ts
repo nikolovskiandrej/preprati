@@ -1,20 +1,24 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { ClientMessageSchema, type ServerMessage } from '../../shared/signaling';
+import { ClientMessageSchema } from '../../shared/signaling';
 import { sendApiError } from '../http/apiError';
-import type { PollingConnection, PollingSignaling } from './pollingSignaling';
+import type { InboxBatch, PollingConnection, PollingSignaling } from './pollingSignaling';
 
 /**
  * HTTP transport for signaling (serverless deployments):
  *
  *   POST /api/signal/connect     → { connectionId, token }
- *   POST /api/signal/send        body: ClientMessage      → { messages }
- *   GET  /api/signal/poll                                  → { messages }
+ *   POST /api/signal/send        body: ClientMessage      → { messages, firstSeq }
+ *   GET  /api/signal/poll                                  → { messages, firstSeq }
  *   POST /api/signal/disconnect  body: { connectionId, token }  (sendBeacon-friendly)
  *
  * `send` and `poll` authenticate with `Authorization: Bearer <token>` and
  * `X-Signal-Connection: <connectionId>`. `send` also takes `X-Signal-Seq`, a
  * per-connection message number, so a retried request is handled only once.
- * Message shapes are identical to the WebSocket transport.
+ * Both take `X-Signal-Ack`, the number of the last inbox message the client
+ * has processed: messages stay queued until acknowledged, and message `i` of
+ * a response has number `firstSeq + i`. Without the header (older clients),
+ * returned messages are removed right away. Message shapes are identical to
+ * the WebSocket transport.
  */
 export function registerHttpSignalingRoutes(
   app: FastifyInstance,
@@ -38,8 +42,13 @@ export function registerHttpSignalingRoutes(
     return record;
   };
 
-  const respond = (reply: FastifyReply, messages: ServerMessage[]) =>
-    reply.header('Cache-Control', 'no-store').send({ messages });
+  const respond = (reply: FastifyReply, batch: InboxBatch) =>
+    reply.header('Cache-Control', 'no-store').send(batch);
+
+  const ackOf = (request: FastifyRequest): number | null => {
+    const value = request.headers['x-signal-ack'];
+    return typeof value === 'string' && /^\d{1,12}$/.test(value) ? Number(value) : null;
+  };
 
   app.post('/api/signal/connect', async (request, reply) => {
     const credentials = await signaling.connect(request.ip);
@@ -51,7 +60,8 @@ export function registerHttpSignalingRoutes(
     if (!connection) return reply;
     const parsed = ClientMessageSchema.safeParse(request.body);
     if (!parsed.success) {
-      return respond(reply, [{ type: 'error', code: 'invalid-message' }]);
+      await signaling.reportError(connection.id, 'invalid-message');
+      return respond(reply, await signaling.read(connection.id, ackOf(request)));
     }
     const seq = request.headers['x-signal-seq'];
     const isRetry =
@@ -60,13 +70,13 @@ export function registerHttpSignalingRoutes(
       !(await signaling.claimSequence(connection.id, Number(seq)));
     if (!isRetry) await signaling.handle(connection, parsed.data);
     // Replies are already queued; expiry checks run on the regular polls.
-    return respond(reply, await signaling.drain(connection.id));
+    return respond(reply, await signaling.read(connection.id, ackOf(request)));
   });
 
   app.get('/api/signal/poll', async (request, reply) => {
     const connection = await authenticate(request, reply);
     if (!connection) return reply;
-    return respond(reply, await signaling.poll(connection));
+    return respond(reply, await signaling.poll(connection, ackOf(request)));
   });
 
   // navigator.sendBeacon cannot set headers; credentials travel in the body (text/plain or JSON).

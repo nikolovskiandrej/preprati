@@ -65,7 +65,7 @@ export class FakeChannel implements ChannelLike {
     }
   }
 
-  private emit(type: string, event: Event): void {
+  protected emit(type: string, event: Event): void {
     for (const listener of [...(this.listeners.get(type) ?? [])])
       (listener as (event: Event) => void)(event);
   }
@@ -76,7 +76,7 @@ export class FakeChannel implements ChannelLike {
     setTimeout(() => this.flush(), 0);
   }
 
-  private flush(): void {
+  protected flush(): void {
     this.flushing = false;
     if (this.readyState !== 'open' || !this.peer) return;
     let budget = this.bytesPerTick;

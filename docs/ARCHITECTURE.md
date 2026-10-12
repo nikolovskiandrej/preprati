@@ -11,7 +11,7 @@
  Browser B
 ```
 
-- **Quick Transfer:** signaling only introduces the browsers; files flow peer-to-peer (or via an optional TURN relay).
+- **Quick Transfer:** signaling only introduces the browsers; files flow peer-to-peer (or via an optional TURN relay). Free STUN servers make direct connections across networks possible; when none is possible the app explains why and offers a retry or a share link ([CONNECTIVITY.md](CONNECTIVITY.md)).
 - **Share Files:** browsers encrypt before upload and decrypt after download; the server stores ciphertext.
 
 **Serverless profile (Vercel).** The same Fastify app runs as one function behind `/api/*` (`src/server/vercel.ts`); the CDN serves the frontend. Because instances share no memory, signaling uses HTTP polling with its state in Redis (`PollingSignaling`), share metadata and capacity counters move to Redis (`KvMetaStore`, `KvUsageTracker`), and ciphertext goes to a private Vercel Blob store (`VercelBlobStore`). Expiry is enforced on every read; due packages are swept on traffic and by a daily cron job. See [DEPLOYMENT.md](DEPLOYMENT.md#vercel).
@@ -29,7 +29,8 @@ src/
     vercel.ts      Vercel function entry (one app instance per function instance).
     security/      Rate limiter, origin policy, security headers/CSP.
     kv/            KvStore: in-memory and Upstash Redis (REST) implementations.
-    signaling/     SessionManager + WebSocket route; PollingSignaling + HTTP routes (Redis); ICE/TURN.
+    signaling/     SessionManager + WebSocket route; PollingSignaling + HTTP routes (Redis);
+                   ice.ts: the only place STUN/TURN servers are defined and validated.
     shares/        ShareService (lifecycle, quota, expiry, cleanup, reconcile), KvUsageTracker, HTTP routes.
     storage/       BlobStore interface; LocalBlobStore (atomic writes), S3BlobStore (lazy SDK),
                    VercelBlobStore (private store, write budget) and KvMetaStore (metadata in Redis).
@@ -40,8 +41,9 @@ src/
     icons/         Custom icon family.
     i18n/          English + Macedonian catalogs, ICU-style plural formatter.
     lib/           Formatting, files, device labels, clipboard, QR (SVG + PNG), HTTP, downloads.
-    transfer/      Quick Transfer: protocol, TransferEngine, PeerLink, signaling clients (WebSocket,
-                   HTTP polling), QuickSession.
+    transfer/      Quick Transfer: protocol, TransferEngine, PeerLink (ICE restarts), signaling clients
+                   (WebSocket, HTTP polling), QuickSession (attempts, retry), diagnostics (failure
+                   causes, no addresses), iceConfig (validates servers received from signaling).
     share/         Share Files: crypto, manifest/layout, API, ShareCreator, ShareRetriever.
     features/      Composite UI for the flows (pairing ticket, progress, offers, file panes).
     ui/            Design-system primitives (Button, Dialog, Toast, ProgressBar, QrCode, QrActions…).
@@ -54,13 +56,13 @@ e2e/               Playwright end-to-end against the production build.
 
 UI components never touch WebRTC, crypto or storage directly. Each flow has one framework-agnostic "store" class with explicit phases and immutable snapshots, and React subscribes through `useSyncExternalStore`:
 
-| Store            | Owns                                                           | Phases                                                                                                                                                                                                                                                                    |
-| ---------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QuickSession`   | signaling socket, `PeerLink`, `TransferEngine`, received files | `idle → creating-session → waiting-for-peer → [approval-required] → peer-connected → connecting → connected → awaiting-acceptance → transferring → completed` (+ `joining`, `awaiting-approval` for guests; `rejected`, `cancelled`, `expired`, `disconnected`, `failed`) |
-| `ShareCreator`   | selection, key, upload pipeline, owner token, status polling   | `selecting-files → awaiting-confirmation → encrypting → uploading → finalizing → ready-to-share → accessed → expired` (+ `deleting`, `deleted`, `failed`)                                                                                                                 |
-| `ShareRetriever` | key, manifest, chunk cache, per-file downloads, zip            | `opening-share → fetching-package → decrypting → ready-to-download` (+ `failed`; per file `idle → downloading → saved \| failed`)                                                                                                                                         |
+| Store            | Owns                                                           | Phases                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QuickSession`   | signaling socket, `PeerLink`, `TransferEngine`, received files | `idle → creating-session → waiting-for-peer → [approval-required] → peer-connected → connecting → connected → awaiting-acceptance → transferring → completed` (+ `joining`, `awaiting-approval` for guests; `rejected`, `cancelled`, `expired`, `disconnected`, `failed`). A failed connection carries a `failure` (cause + diagnostics) and `canRetry`; `retryConnection()` goes back to `connecting` as a new attempt. `reconnecting` is set while a dropped connection is repaired. |
+| `ShareCreator`   | selection, key, upload pipeline, owner token, status polling   | `selecting-files → awaiting-confirmation → encrypting → uploading → finalizing → ready-to-share → accessed → expired` (+ `deleting`, `deleted`, `failed`)                                                                                                                                                                                                                                                                                                                              |
+| `ShareRetriever` | key, manifest, chunk cache, per-file downloads, zip            | `opening-share → fetching-package → decrypting → ready-to-download` (+ `failed`; per file `idle → downloading → saved \| failed`)                                                                                                                                                                                                                                                                                                                                                      |
 
-`useOwnedStore` creates a store inside an effect and disposes it on unmount. React StrictMode's dev-only double mount therefore never leaves a disposed store in use. A generation counter in `QuickSession` drops late callbacks from torn-down connections.
+`useOwnedStore` creates a store inside an effect and disposes it on unmount. React StrictMode's dev-only double mount therefore never leaves a disposed store in use. A generation counter in `QuickSession` drops late callbacks from torn-down connections, and an attempt number drops those from abandoned connection attempts.
 
 The public Quick Transfer phase is derived (`derivePhase`): the connection phase, refined by the active transfer's status once connected. Connection-level and transfer-level states cannot contradict each other.
 

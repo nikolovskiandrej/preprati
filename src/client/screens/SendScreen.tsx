@@ -5,24 +5,28 @@
  */
 import { useEffect, useState, type ReactNode } from 'react';
 import { useLocation } from 'wouter';
+import { useConfig } from '../app/config';
 import { useLeaveWarning, useOwnedStore } from '../app/hooks';
 import { FlowHeader } from '../features/common/FlowHeader';
 import { SelectedFilesPane } from '../features/common/SelectedFilesPane';
 import { describeQuickError } from '../features/quick/errors';
 import {
   ApprovalPrompt,
+  ConnectingStatus,
   ConnectionBadge,
   GhostTicket,
   LivePanel,
   PairingTicket,
   QuickError,
+  ReconnectingNotice,
   StatusBlock,
   TransferDone,
   TransferProgress,
 } from '../features/quick/panels';
 import { useI18n } from '../i18n';
-import { SendIcon } from '../icons';
+import { LinkIcon, RetryIcon, SendIcon } from '../icons';
 import { localFileId, type SelectedFile } from '../lib/files';
+import { handOffFiles } from '../lib/handoff';
 import { QuickSession, type QuickState } from '../transfer/quickSession';
 import { Button } from '../ui/Button';
 import styles from './QuickScreens.module.css';
@@ -35,6 +39,8 @@ export default function SendScreen() {
   );
   const [files, setFiles] = useState<SelectedFile[]>([]);
   const [composing, setComposing] = useState(false);
+  const { config } = useConfig();
+  const shareAvailable = config?.share.enabled === true;
 
   const phase = state?.phase ?? 'idle';
   const locked = phase === 'awaiting-acceptance' || phase === 'transferring';
@@ -66,6 +72,11 @@ export default function SendScreen() {
     setComposing(true);
   };
   const end = () => navigate('/');
+  /** The devices can't connect directly: upload the same files as an encrypted share link. */
+  const sendAsLink = () => {
+    handOffFiles(files.map((entry) => entry.file));
+    navigate('/share');
+  };
 
   const device = state?.peer?.label ?? t('common.unknownDevice');
   const live = renderLive();
@@ -85,23 +96,45 @@ export default function SendScreen() {
         ),
       };
     }
-    const error = describeQuickError(state);
+    const error = describeQuickError(state, { shareAvailable });
     if (error) {
+      const retry = error.connection?.canRetry === true;
+      const offerLink = !!error.connection && shareAvailable && files.length > 0;
       const actions =
         error.recovery === 'retry-send' ? (
           <Button variant="primary" onClick={sendNow} disabled={files.length === 0}>
             {t('quick.sendAgain')}
           </Button>
-        ) : error.recovery === 'restart' ? (
-          <Button variant="primary" onClick={() => void session.host('sender')}>
-            {t('quick.newSession')}
-          </Button>
         ) : (
-          <Button variant="inverse" onClick={end}>
-            {t('common.goHome')}
-          </Button>
+          <>
+            {retry ? (
+              <Button variant="primary" icon={RetryIcon} onClick={() => session.retryConnection()}>
+                {t('quick.tryAgain')}
+              </Button>
+            ) : null}
+            {offerLink ? (
+              <Button variant={retry ? 'inverse' : 'primary'} icon={LinkIcon} onClick={sendAsLink}>
+                {t('quick.sendAsLink')}
+              </Button>
+            ) : null}
+            {error.recovery === 'restart' ? (
+              <Button
+                variant={retry || offerLink ? 'ghost' : 'primary'}
+                onClick={() => void session.host('sender')}
+              >
+                {t('quick.newSession')}
+              </Button>
+            ) : (
+              <Button variant="inverse" onClick={end}>
+                {t('common.goHome')}
+              </Button>
+            )}
+          </>
         );
-      return { key: `error-${error.message}`, node: <QuickError view={error} actions={actions} /> };
+      return {
+        key: `error-${error.message}-${retry}`,
+        node: <QuickError view={error} actions={actions} />,
+      };
     }
     if (
       composing &&
@@ -157,16 +190,7 @@ export default function SendScreen() {
         };
       case 'peer-connected':
       case 'connecting':
-        return {
-          key: 'connecting',
-          node: (
-            <StatusBlock
-              busy
-              title={t('quick.connecting', { device })}
-              detail={t('quick.connectingHint')}
-            />
-          ),
-        };
+        return { key: 'connecting', node: <ConnectingStatus device={device} /> };
       case 'connected':
         return {
           key: 'connected',
@@ -274,7 +298,10 @@ export default function SendScreen() {
           onRemove={removeFile}
           locked={locked}
         />
-        <LivePanel stateKey={live.key}>{live.node}</LivePanel>
+        <LivePanel stateKey={live.key}>
+          {state?.reconnecting ? <ReconnectingNotice /> : null}
+          {live.node}
+        </LivePanel>
       </div>
     </div>
   );

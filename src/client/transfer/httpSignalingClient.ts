@@ -5,8 +5,13 @@
  *
  * - Outgoing messages are POSTed strictly in order (an offer must arrive
  *   before its ICE candidates); each response carries any queued replies.
- * - The inbox is polled every 400 ms while messages are flowing, 1.5 s when
- *   idle, and every 5 s in "quiet" mode once the direct connection is up.
+ * - Incoming messages are numbered by the server and stay queued until a
+ *   later request acknowledges them (`X-Signal-Ack`). A response lost on a
+ *   flaky network is therefore delivered again, and duplicates from
+ *   overlapping requests are skipped: every message is handled once, in order.
+ * - The inbox is polled every 400 ms while messages are flowing; otherwise at
+ *   the pace QuickSession sets: 1.5 s while pairing, 5 s after a failed
+ *   attempt, 15 s once the devices talk directly (presence only).
  * - Closing the page sends a `sendBeacon` disconnect so the other device
  *   learns right away; otherwise the server notices after a few minutes.
  */
@@ -16,17 +21,25 @@ import {
   type ServerMessage,
 } from '../../shared/signaling';
 import { apiBaseUrl } from '../lib/env';
-import type { SignalingCloseReason, SignalingTransport } from './signalingClient';
+import type { SignalingCloseReason, SignalingPace, SignalingTransport } from './signalingClient';
 
 const ACTIVE_INTERVAL_MS = 400;
-const IDLE_INTERVAL_MS = 1500;
-const QUIET_INTERVAL_MS = 5000;
 const ACTIVE_WINDOW_MS = 6000;
+const PACE_INTERVAL_MS: Record<SignalingPace, number> = {
+  normal: 1500,
+  standby: 5000,
+  quiet: 15_000,
+};
 const MAX_CONSECUTIVE_FAILURES = 8;
 
 interface Credentials {
   connectionId: string;
   token: string;
+}
+
+interface Batch {
+  messages: unknown[];
+  firstSeq: number;
 }
 
 export class HttpSignalingClient implements SignalingTransport {
@@ -35,12 +48,14 @@ export class HttpSignalingClient implements SignalingTransport {
   private readonly closeListeners = new Set<(reason: SignalingCloseReason) => void>();
   private outbox: { seq: number; message: ClientMessage }[] = [];
   private nextSeq = 1;
+  /** Number of the last inbox message handled (acknowledged on every request). */
+  private lastReceived = 0;
   private sending = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private polling = false;
   private failures = 0;
   private lastActivity = 0;
-  private quiet = false;
+  private pace: SignalingPace = 'normal';
   private closed = false;
 
   constructor(private readonly baseUrl: string = apiBaseUrl()) {}
@@ -91,9 +106,11 @@ export class HttpSignalingClient implements SignalingTransport {
     return () => this.closeListeners.delete(listener);
   }
 
-  /** Slows polling down once peers talk directly (presence only). */
-  setQuiet(quiet: boolean): void {
-    this.quiet = quiet;
+  /** Polls faster or slower; switching to a faster pace checks right away. */
+  setPace(pace: SignalingPace): void {
+    const faster = PACE_INTERVAL_MS[pace] < PACE_INTERVAL_MS[this.pace];
+    this.pace = pace;
+    if (faster && !this.polling) this.schedulePoll(0);
   }
 
   close(): void {
@@ -111,6 +128,7 @@ export class HttpSignalingClient implements SignalingTransport {
     return {
       Authorization: `Bearer ${this.credentials!.token}`,
       'X-Signal-Connection': this.credentials!.connectionId,
+      'X-Signal-Ack': String(this.lastReceived),
     };
   }
 
@@ -120,12 +138,12 @@ export class HttpSignalingClient implements SignalingTransport {
     try {
       while (this.outbox.length > 0 && this.isOpen) {
         const { seq, message } = this.outbox[0]!;
-        const messages = await this.request('POST', '/api/signal/send', message, {
+        const batch = await this.request('POST', '/api/signal/send', message, {
           'X-Signal-Seq': String(seq),
         });
-        if (messages === null) return; // failure handling scheduled a retry or closed
+        if (batch === null) return; // failure handling scheduled a retry or closed
         this.outbox.shift();
-        this.deliver(messages);
+        this.deliver(batch);
       }
     } finally {
       this.sending = false;
@@ -140,18 +158,16 @@ export class HttpSignalingClient implements SignalingTransport {
 
   private nextInterval(): number {
     if (this.failures > 0) return Math.min(10_000, 500 * 2 ** this.failures);
-    if (this.quiet) return QUIET_INTERVAL_MS;
-    return Date.now() - this.lastActivity < ACTIVE_WINDOW_MS
-      ? ACTIVE_INTERVAL_MS
-      : IDLE_INTERVAL_MS;
+    if (Date.now() - this.lastActivity < ACTIVE_WINDOW_MS) return ACTIVE_INTERVAL_MS;
+    return PACE_INTERVAL_MS[this.pace];
   }
 
   private async poll(): Promise<void> {
     if (this.closed || this.polling) return;
     this.polling = true;
     try {
-      const messages = await this.request('GET', '/api/signal/poll');
-      if (messages) this.deliver(messages);
+      const batch = await this.request('GET', '/api/signal/poll');
+      if (batch) this.deliver(batch);
     } finally {
       this.polling = false;
       this.schedulePoll(this.nextInterval());
@@ -164,7 +180,7 @@ export class HttpSignalingClient implements SignalingTransport {
     path: string,
     body?: unknown,
     extraHeaders: Record<string, string> = {},
-  ): Promise<ServerMessage[] | null> {
+  ): Promise<Batch | null> {
     if (!this.credentials) return null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15_000);
@@ -187,12 +203,12 @@ export class HttpSignalingClient implements SignalingTransport {
         return null;
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = (await response.json()) as { messages?: unknown[] };
+      const payload = (await response.json()) as { messages?: unknown; firstSeq?: unknown };
       this.failures = 0;
-      return (payload.messages ?? []).flatMap((raw) => {
-        const parsed = ServerMessageSchema.safeParse(raw);
-        return parsed.success ? [parsed.data] : [];
-      });
+      return {
+        messages: Array.isArray(payload.messages) ? payload.messages : [],
+        firstSeq: typeof payload.firstSeq === 'number' ? payload.firstSeq : 0,
+      };
     } catch {
       this.failures += 1;
       if (this.failures >= MAX_CONSECUTIVE_FAILURES) this.finish('error');
@@ -204,12 +220,20 @@ export class HttpSignalingClient implements SignalingTransport {
     }
   }
 
-  private deliver(messages: ServerMessage[]): void {
-    if (messages.length > 0) this.lastActivity = Date.now();
-    for (const message of messages) {
-      if (message.type === 'pong') continue;
-      for (const listener of [...this.messageListeners]) listener(message);
-    }
+  /** Hands new messages to the listeners, skipping any already handled. */
+  private deliver(batch: Batch): void {
+    batch.messages.forEach((raw, index) => {
+      if (this.closed) return;
+      const seq = batch.firstSeq > 0 ? batch.firstSeq + index : 0;
+      if (seq > 0) {
+        if (seq <= this.lastReceived) return; // delivered by an overlapping request
+        this.lastReceived = seq;
+      }
+      this.lastActivity = Date.now();
+      const parsed = ServerMessageSchema.safeParse(raw);
+      if (!parsed.success || parsed.data.type === 'pong') return;
+      for (const listener of [...this.messageListeners]) listener(parsed.data);
+    });
   }
 
   private readonly handlePageHide = () => this.beaconDisconnect();

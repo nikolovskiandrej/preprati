@@ -11,6 +11,13 @@ import {
 
 export type SignalingCloseReason = 'closed' | 'timeout' | 'error';
 
+/**
+ * How eagerly a polling transport should check for messages:
+ * `normal` while devices pair and negotiate, `standby` after a failed attempt
+ * (a "Try again" may still come), `quiet` once the devices talk directly.
+ */
+export type SignalingPace = 'normal' | 'standby' | 'quiet';
+
 /** A signaling channel: WebSocket (default) or HTTP polling (serverless hosts). */
 export interface SignalingTransport {
   /** Opens the channel; rejects if it cannot connect within `timeoutMs`. */
@@ -19,8 +26,8 @@ export interface SignalingTransport {
   send(message: ClientMessage): boolean;
   onMessage(listener: (message: ServerMessage) => void): () => void;
   onClose(listener: (reason: SignalingCloseReason) => void): () => void;
-  /** Hint that the peers now talk directly, so signaling may idle. */
-  setQuiet?(quiet: boolean): void;
+  /** Pacing hint for transports that poll (a WebSocket is pushed to and ignores it). */
+  setPace?(pace: SignalingPace): void;
   close(): void;
 }
 

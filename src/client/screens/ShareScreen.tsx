@@ -11,6 +11,7 @@ import { creatorErrorMessage } from '../features/share/messages';
 import { useI18n } from '../i18n';
 import { CheckCircleIcon, ClockIcon, LinkIcon, LockIcon, SendIcon, TrashIcon } from '../icons';
 import { isSecureContextAvailable } from '../lib/env';
+import { clearHandedOffFiles, handedOffFiles } from '../lib/handoff';
 import {
   formatBytes,
   formatDateTime,
@@ -87,15 +88,23 @@ export default function ShareScreen() {
 
 function ShareCreatorView({ limits }: { limits: ShareLimits }) {
   const { t, locale } = useI18n();
-  const [creator, state] = useOwnedStore<CreatorState, ShareCreator>(
-    () => new ShareCreator(limits),
-  );
+  const [creator, state] = useOwnedStore<CreatorState, ShareCreator>(() => {
+    const store = new ShareCreator(limits);
+    // Files from a Quick Transfer that couldn't connect ("Send as a link instead").
+    const handedOff = handedOffFiles();
+    if (handedOff.length > 0) store.addFiles(handedOff);
+    return store;
+  });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const now = useNow(30_000);
 
   useEffect(() => {
     creator?.setLimits(limits);
   }, [creator, limits]);
+
+  useEffect(() => {
+    if (creator) clearHandedOffFiles();
+  }, [creator]);
 
   const phase = state?.phase ?? 'selecting-files';
   const uploading = phase === 'encrypting' || phase === 'uploading' || phase === 'finalizing';

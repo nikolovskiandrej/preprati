@@ -129,6 +129,54 @@ describe('origin policy', () => {
 describe('ICE configuration', () => {
   const base = loadConfig({ STUN_URLS: 'stun:stun.example.com:3478' }).ice;
 
+  it('uses two free STUN providers by default, and no relay', () => {
+    const config = loadConfig({});
+    expect(config.ice.stunUrls).toEqual([
+      'stun:stun.l.google.com:19302',
+      'stun:stun.cloudflare.com:3478',
+    ]);
+    expect(config.ice.turn).toBeNull();
+    expect(config.warnings).toEqual([]);
+    expect(iceServersFor(config.ice, 'session')).toEqual([{ urls: config.ice.stunUrls }]);
+  });
+
+  it('can turn STUN off on purpose, and says what that means', () => {
+    const config = loadConfig({ STUN_URLS: '' });
+    expect(config.ice.stunUrls).toEqual([]);
+    expect(iceServersFor(config.ice, 'session')).toEqual([]);
+    expect(config.warnings).toEqual([expect.stringContaining('same network')]);
+  });
+
+  it('validates STUN and TURN URLs and removes duplicates', () => {
+    expect(
+      loadConfig({
+        STUN_URLS: 'stun:a.example:3478, stun:a.example:3478 ,stuns:[2001:db8::1]:5349',
+      }).ice.stunUrls,
+    ).toEqual(['stun:a.example:3478', 'stuns:[2001:db8::1]:5349']);
+    for (const bad of [
+      'stun.l.google.com:19302',
+      'http://stun.example',
+      'stun:bad host',
+      'stun:a.example:0',
+      'stun:a.example:70000',
+      'turn:t.example:3478',
+      'stun:a.example?transport=udp',
+      'stun:user@a.example',
+    ]) {
+      expect(() => loadConfig({ STUN_URLS: bad }), bad).toThrow(/STUN_URLS/);
+    }
+    expect(() => loadConfig({ STUN_URLS: 'stun:a:1,stun:b:1,stun:c:1,stun:d:1,stun:e:1' })).toThrow(
+      /at most 4/,
+    );
+    expect(() =>
+      loadConfig({ TURN_URLS: 'turn:t.example:3478?transport=sctp', TURN_SECRET: 'x' }),
+    ).toThrow(/TURN_URLS/);
+    expect(
+      loadConfig({ TURN_URLS: 'turns:t.example:443?transport=tcp', TURN_SECRET: 'x' }).ice.turn
+        ?.urls,
+    ).toEqual(['turns:t.example:443?transport=tcp']);
+  });
+
   it('offers STUN only when no relay is configured', () => {
     expect(iceServersFor(base, 'session')).toEqual([{ urls: ['stun:stun.example.com:3478'] }]);
   });
