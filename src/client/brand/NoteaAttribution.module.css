@@ -15,31 +15,13 @@ a.attribution:hover .name {
   text-underline-offset: 3px;
 }
 
-.chip {
-  display: inline-grid;
-  place-items: center;
-  border-radius: 7px;
-  line-height: 0;
-}
-
+/* Height only: the width follows the image's own ratio, so the mark is never stretched. */
 .logo {
-  width: 26px;
-  height: 19px;
-  object-fit: contain;
+  flex: none;
+  height: 1.2rem;
+  width: auto;
 }
 
 .name {
   color: var(--text);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) .chip {
-    background: var(--cream);
-    padding: 3px 4px;
-  }
-}
-
-:root[data-theme='dark'] .chip {
-  background: var(--cream);
-  padding: 3px 4px;
 }

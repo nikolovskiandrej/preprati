@@ -57,4 +57,11 @@ Plain, specific and calm. Say what happens ("Encrypt & create link", "Delete Sha
 
 ## Notea attribution
 
-"Made by" + the original Notea logo (background removed, proportions kept) + "Notea", small, in the footer. On dark backgrounds the logo sits on a cream chip so its green stays legible. It links to `NOTEA_URL` when configured.
+"Made by" + the Notea mark + "Notea", small, in the footer. It links to `NOTEA_URL` when configured.
+
+The mark is transparent on both appearances, with no tile behind it:
+
+- Light: Notea's dark green mark (`src/client/assets/notea-logo.png`), cut from the original artwork `Pasted image.png`.
+- Dark: Notea's own mint mark (`src/client/assets/notea-logo-on-dark.png`), the version noteawork.com shows on its dark pages. The dark green would disappear on a dark background.
+
+Both files are 130×96 px, trimmed to the mark, with the original proportions (about 1.35:1). The footer sets only the height, so the width always follows that ratio.

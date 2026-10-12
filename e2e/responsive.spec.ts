@@ -109,6 +109,28 @@ test.describe('accessibility', () => {
     await context.close();
   });
 
+  test('the Notea mark is transparent and unstretched in both appearances', async ({ browser }) => {
+    for (const colorScheme of ['light', 'dark'] as const) {
+      const { page, context } = await newDevice(browser, { colorScheme });
+      await page.goto('/');
+      const logo = page.locator('footer img');
+      await expect(logo).toHaveJSProperty('complete', true);
+      const shown = await logo.evaluate((img: HTMLImageElement) => {
+        const box = img.getBoundingClientRect();
+        return {
+          src: img.currentSrc,
+          ratio: box.width / box.height,
+          naturalRatio: img.naturalWidth / img.naturalHeight,
+          backgrounds: [img, img.parentElement!].map((el) => getComputedStyle(el).backgroundColor),
+        };
+      });
+      expect(shown.src.includes('notea-logo-on-dark')).toBe(colorScheme === 'dark');
+      expect(Math.abs(shown.ratio - shown.naturalRatio)).toBeLessThan(0.01);
+      expect(shown.backgrounds).toEqual(['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)']);
+      await context.close();
+    }
+  });
+
   test('the main flows work with the keyboard alone', async ({ page }) => {
     await page.goto('/');
     await page.keyboard.press('Tab');

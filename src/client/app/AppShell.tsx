@@ -63,7 +63,7 @@ export function AppShell({ children, introActive }: { children: ReactNode; intro
         {children}
       </main>
       <footer className={styles.footer}>
-        <NoteaAttribution url={config?.attribution.url ?? null} />
+        <NoteaAttribution url={config?.attribution.url ?? null} theme={theme} />
       </footer>
     </div>
   );

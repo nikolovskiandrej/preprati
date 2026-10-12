@@ -122,7 +122,7 @@ docs/         architecture, protocol, security, deployment, brand, icons
 public/       favicons, app icons, manifest, robots.txt, theme bootstrap
 ```
 
-The original brand references (`Современ концепт за бренд Препрати.png`, `Pasted image.png`) are kept in the project root. The app uses vector logo geometry derived from the concept image and a background-free copy of the Notea logo (`src/client/assets/notea-logo.png`).
+The original brand references (`Современ концепт за бренд Препрати.png`, `Pasted image.png`) are kept in the project root. The app uses vector logo geometry derived from the concept image. The footer shows transparent copies of the Notea mark: dark green on light (`src/client/assets/notea-logo.png`) and Notea's mint mark on dark (`src/client/assets/notea-logo-on-dark.png`).
 
 ## Browser support
 
