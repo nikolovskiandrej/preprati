@@ -122,7 +122,11 @@ export async function buildApp(
   });
   app.addHook('onRequest', async (request, reply) => {
     if (!request.url.startsWith('/api/')) return;
-    if (!isOriginAllowed(request.headers.origin, request.headers.host, config)) {
+    // The disconnect beacon is authenticated by the credentials in its body. Browsers send
+    // beacons without CORS, so under this site's no-referrer policy their Origin is "null";
+    // refusing it left the other device waiting for a page that was already gone.
+    const beacon = request.method === 'POST' && request.url === '/api/signal/disconnect';
+    if (!beacon && !isOriginAllowed(request.headers.origin, request.headers.host, config)) {
       return sendApiError(reply, 403, 'invalid-request', 'Origin not allowed');
     }
     const limiter = request.url.startsWith('/api/signal/poll') ? pollLimiter : apiLimiter;
@@ -335,6 +339,7 @@ export async function buildApp(
             ...limits,
           },
       attribution: { url: config.attributionUrl },
+      linkOrigin: config.linkOrigin,
     };
     return reply.header('Cache-Control', 'no-store').send(body);
   });

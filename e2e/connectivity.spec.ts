@@ -199,9 +199,11 @@ test.describe('Connecting across networks', () => {
     await laptop.page.getByRole('button', { name: 'Allow' }).click();
     await expect(laptop.page.getByText(/Connecting to/)).toBeVisible();
 
-    // The other device leaves before the files got there; a link still works on any network.
+    // The other device leaves before the files got there: the session waits for another
+    // device, and the files can go as a link that works later, on any network.
     await phone.context.close();
-    await laptop.page.getByRole('button', { name: 'Send as a link instead' }).click(RECOVERY);
+    await expect(laptop.page.getByText(/left before anything was sent/)).toBeVisible(RECOVERY);
+    await laptop.page.getByRole('button', { name: 'Make a link that works later' }).click();
     await expect(laptop.page).toHaveURL(/\/share$/);
     await expect(laptop.page.getByText(/1 file selected/)).toBeVisible();
     await expect(laptop.page.getByText('slides', { exact: false }).first()).toBeVisible();

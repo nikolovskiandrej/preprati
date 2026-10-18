@@ -11,11 +11,15 @@
  *   waiting ──join──▶ pending-approval ──approve──▶ paired
  *                                      └─decline──▶ waiting
  *   waiting ──pairing TTL──▶ expired (destroyed)
- *   any ──host/guest leaves──▶ destroyed (the other side gets `peer-left`)
+ *   paired ──guest leaves, nothing moved yet──▶ waiting (same link and code)
+ *   any ──host leaves, or guest leaves a locked session──▶ destroyed (`peer-left`)
  *   any ──max lifetime──▶ destroyed (`session-closed`)
  *
  * The pairing TTL only applies while waiting for a peer: once two devices are
- * paired, an active transfer is never cut off by the pairing countdown.
+ * paired, an active transfer is never cut off by the pairing countdown. A
+ * guest that leaves before any files moved frees the session for another
+ * device (a link opened in the wrong browser first must not use it up); once
+ * the host locks it (files are moving), the guest's departure ends it.
  * File contents never pass through here.
  */
 import { PAIRING_CODE_ALPHABET, PAIRING_CODE_LENGTH } from '../../shared/constants';
@@ -48,6 +52,8 @@ interface Session {
   guest: SignalingPeer | null;
   guestDevice: DeviceInfo | null;
   state: SessionState;
+  /** Files have moved: the guest's departure ends the session. */
+  locked: boolean;
   createdAt: number;
   pairingExpiresAt: number;
   pairingTimer: ReturnType<typeof setTimeout> | null;
@@ -112,6 +118,7 @@ export class SessionManager {
       guest: null,
       guestDevice: null,
       state: 'waiting',
+      locked: false,
       createdAt: now,
       pairingExpiresAt: now + this.options.pairingTtlMs,
       pairingTimer: null,
@@ -217,6 +224,16 @@ export class SessionManager {
     return { ok: true };
   }
 
+  /** Host: files are moving, so the guest's departure will end the session. */
+  lockSession(peer: SignalingPeer): SessionResult {
+    const session = this.byPeer.get(peer.connectionId);
+    if (!session) return { ok: false, code: 'not-in-session' };
+    if (session.host !== peer) return { ok: false, code: 'not-allowed' };
+    if (!session.locked) this.log('session-locked', { session: sessionTag(session.id) });
+    session.locked = true;
+    return { ok: true };
+  }
+
   relay(peer: SignalingPeer, payload: SignalPayload): SessionResult {
     const session = this.byPeer.get(peer.connectionId);
     if (!session) return { ok: false, code: 'not-in-session' };
@@ -250,6 +267,21 @@ export class SessionManager {
       session.state = 'waiting';
       session.host.send({ type: 'peer-left', reason });
       if (this.now() >= session.pairingExpiresAt) this.expire(session);
+      return;
+    }
+    if (session.host !== peer && !session.locked) {
+      // Nothing moved yet: wait for another device, with the same link and code.
+      this.byPeer.delete(peer.connectionId);
+      session.guest = null;
+      session.guestDevice = null;
+      session.state = 'waiting';
+      session.pairingExpiresAt = Math.max(
+        session.pairingExpiresAt,
+        this.now() + this.options.pairingTtlMs,
+      );
+      this.armPairingTimer(session);
+      this.log('session-reopened', { session: sessionTag(session.id), reason });
+      session.host.send({ type: 'peer-left', reason, expiresAt: session.pairingExpiresAt });
       return;
     }
     other?.send({ type: 'peer-left', reason });

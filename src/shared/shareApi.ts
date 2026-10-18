@@ -49,6 +49,14 @@ export interface PublicConfig {
   attribution: {
     url: string | null;
   };
+  /**
+   * The origin that links and QR codes point to, when the server names one
+   * (PUBLIC_ORIGIN, or the production domain on Vercel); null means the page's
+   * own origin. A page can be open on another address of the same app, such as
+   * a login-protected deployment URL, and links copied from it must still open
+   * for recipients.
+   */
+  linkOrigin: string | null;
 }
 
 /* -------------------------------------------------------------------------- */

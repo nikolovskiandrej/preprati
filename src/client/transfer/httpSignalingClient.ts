@@ -232,7 +232,7 @@ export class HttpSignalingClient implements SignalingTransport {
       });
       if (response.status === 401) {
         // The server forgot this connection (expired presence): signaling is over.
-        this.finish('closed');
+        this.finish('ended');
         return null;
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -271,7 +271,7 @@ export class HttpSignalingClient implements SignalingTransport {
 
   private readonly handlePageHide = (event: PageTransitionEvent) => {
     this.beaconDisconnect();
-    if (event.persisted) this.finish('closed');
+    if (event.persisted) this.finish('ended');
   };
 
   /** Back in the foreground: whatever arrived while timers were paused is fetched at once. */

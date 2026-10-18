@@ -130,7 +130,7 @@ describe('QR actions', () => {
     expect(writeText).toHaveBeenCalledWith(URL_WITH_KEY);
   });
 
-  it('uses the native share sheet with the QR image when files can be shared', async () => {
+  it('shares the link itself, without the QR image, so chat apps keep it tappable', async () => {
     const user = userEvent.setup(); // installs its own clipboard; stub ours afterwards
     const share = vi.fn(async (_data: ShareData) => undefined);
     Object.defineProperty(navigator, 'share', { value: share, configurable: true });
@@ -139,8 +139,9 @@ describe('QR actions', () => {
     await user.click(screen.getByTestId('share'));
     await waitFor(() => expect(share).toHaveBeenCalledTimes(1));
     const data = share.mock.calls[0]![0];
-    expect(data.files?.[0]?.name).toBe('preprati-share-qr.png');
-    expect(data.text).toContain(URL_WITH_KEY);
+    // Apps like Instagram keep an attached image and drop the text with the link.
+    expect(data.files).toBeUndefined();
+    expect(data.url).toBe(URL_WITH_KEY);
   });
 
   it('downloads the QR code as a PNG', async () => {

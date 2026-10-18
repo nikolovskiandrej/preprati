@@ -131,6 +131,12 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   /** Host approves / declines a peer that joined with the short pairing code. */
   z.object({ type: z.literal('approve-peer') }),
   z.object({ type: z.literal('decline-peer') }),
+  /**
+   * Host: files have started to move, so this session belongs to the device in
+   * it. From now on its departure ends the session instead of letting another
+   * device join with the same link or code.
+   */
+  z.object({ type: z.literal('lock-session') }),
   z.object({ type: z.literal('leave-session') }),
   z.object({ type: z.literal('ping') }),
 ]);
@@ -201,7 +207,16 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
    * session, closed the page), or it is `gone` silent (stopped checking in, its
    * connection dropped). A direct connection that still works can outlive `gone`.
    */
-  z.object({ type: z.literal('peer-left'), reason: z.enum(['left', 'gone']).optional() }),
+  z.object({
+    type: z.literal('peer-left'),
+    reason: z.enum(['left', 'gone']).optional(),
+    /**
+     * Set when the guest left before any files moved (the session wasn't
+     * locked): the session waits for another device, with the same link and
+     * code, until this time.
+     */
+    expiresAt: z.number().optional(),
+  }),
   z.object({ type: z.literal('session-expired') }),
   z.object({ type: z.literal('session-closed'), reason: SessionClosedReasonSchema }),
   z.object({

@@ -40,6 +40,8 @@ export interface ServerConfig {
   host: string;
   port: number;
   publicOrigin: string | null;
+  /** Where links and QR codes point (see `readLinkOrigin`). */
+  linkOrigin: string | null;
   allowedOrigins: string[];
   trustProxy: boolean | number | string;
   serveStatic: boolean;
@@ -226,6 +228,25 @@ function readOrigin(env: Env, key: string): string | null {
   }
 }
 
+/**
+ * The origin links and QR codes should use. Vercel serves every deployment on
+ * its own URL besides the project's domain, and with deployment protection
+ * (the default) those URLs ask for a Vercel login: a link copied on one would
+ * send recipients to a login page. Production links therefore use the
+ * project's production domain, which Vercel provides, unless PUBLIC_ORIGIN
+ * names the public origin. Elsewhere links use the page's own origin.
+ */
+function readLinkOrigin(env: Env, publicOrigin: string | null): string | null {
+  if (publicOrigin) return publicOrigin;
+  const domain = read(env, 'VERCEL_PROJECT_PRODUCTION_URL');
+  if (read(env, 'VERCEL_ENV') !== 'production' || !domain) return null;
+  try {
+    return new URL(`https://${domain}`).origin;
+  } catch {
+    return null;
+  }
+}
+
 function readTrustProxy(env: Env): boolean | number | string {
   const value = read(env, 'TRUST_PROXY');
   if (value === undefined) return false;
@@ -354,6 +375,8 @@ export function loadConfig(env: Env = process.env, version = '1.0.0'): ServerCon
     );
   }
 
+  const publicOrigin = readOrigin(env, 'PUBLIC_ORIGIN');
+
   return {
     env: runtimeEnv,
     version,
@@ -363,7 +386,8 @@ export function loadConfig(env: Env = process.env, version = '1.0.0'): ServerCon
     cronSecret: read(env, 'CRON_SECRET') ?? null,
     host: read(env, 'HOST') ?? (isProd ? '0.0.0.0' : '127.0.0.1'),
     port: readInt(env, 'PORT', 8787, 0, 65535),
-    publicOrigin: readOrigin(env, 'PUBLIC_ORIGIN'),
+    publicOrigin,
+    linkOrigin: readLinkOrigin(env, publicOrigin),
     allowedOrigins,
     trustProxy: readTrustProxy(env),
     serveStatic: readBool(env, 'SERVE_STATIC', isProd && !serverless),

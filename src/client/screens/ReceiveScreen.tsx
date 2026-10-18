@@ -7,6 +7,7 @@ import { useLocation } from 'wouter';
 import { useConfig } from '../app/config';
 import { useLeaveWarning, useOwnedStore } from '../app/hooks';
 import { FlowHeader } from '../features/common/FlowHeader';
+import { InAppBrowserGate, useInAppBrowserGate } from '../features/common/InAppBrowserGate';
 import { describeQuickError } from '../features/quick/errors';
 import {
   ConnectingStatus,
@@ -33,19 +34,27 @@ export default function ReceiveScreen() {
   const [, navigate] = useLocation();
   const [session, state] = useOwnedStore<QuickState, QuickSession>(() => new QuickSession());
   const { config } = useConfig();
+  // Receiving inside an app's built-in browser (opened from a profile link, say) can't save.
+  const gate = useInAppBrowserGate();
   const phase = state?.phase ?? 'idle';
   useLeaveWarning(phase === 'transferring' || (state?.received.length ?? 0) > 0);
   useSessionWakeLock(state);
 
   useEffect(() => {
-    if (session && phase === 'idle') void session.host('receiver');
-  }, [session, phase]);
+    if (session && phase === 'idle' && !gate.open) void session.host('receiver');
+  }, [session, phase, gate.open]);
 
   const device = state?.peer?.label ?? t('common.unknownDevice');
   const host = typeof window !== 'undefined' ? window.location.host : '';
   const live = renderLive();
 
   function renderLive(): { key: string; node: ReactNode } {
+    if (gate.browser && gate.open) {
+      return {
+        key: 'in-app',
+        node: <InAppBrowserGate browser={gate.browser} onStay={gate.stay} tone="dark" />,
+      };
+    }
     if (!state || !session || phase === 'idle' || phase === 'creating-session') {
       return { key: 'creating', node: <StatusBlock busy title={t('quick.creating')} /> };
     }
@@ -95,7 +104,16 @@ export default function ReceiveScreen() {
     switch (phase) {
       case 'waiting-for-peer':
         return state.session
-          ? { key: 'pairing', node: <PairingTicket session={state.session} hostRole="receiver" /> }
+          ? {
+              key: 'pairing',
+              node: (
+                <PairingTicket
+                  session={state.session}
+                  hostRole="receiver"
+                  reopened={state.reopened}
+                />
+              ),
+            }
           : { key: 'creating', node: <StatusBlock busy title={t('quick.creating')} /> };
       case 'peer-connected':
       case 'connecting':
@@ -205,7 +223,7 @@ export default function ReceiveScreen() {
         </LivePanel>
         <aside className={styles.side}>
           {state && state.received.length > 0 ? (
-            <ReceivedFilesList files={state.received} />
+            <ReceivedFilesList files={state.received} inAppBrowser={!!gate.browser} />
           ) : (
             <>
               <h2 className={styles.sideTitle}>{t('quick.stepsTitle')}</h2>

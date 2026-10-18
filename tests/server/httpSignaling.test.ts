@@ -235,16 +235,28 @@ describe('HTTP signaling routes', () => {
     );
     await poll(host);
 
+    // Like a browser's beacon under this site's no-referrer policy: no CORS, Origin "null".
     const beacon = await fetch(`${server.url}/api/signal/disconnect`, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8', Origin: 'null' },
       body: JSON.stringify(guest),
     });
     expect(beacon.status).toBe(204);
-    expect(await poll(host)).toEqual([{ type: 'peer-left', reason: 'left' }]);
+    // The guest left before anything moved: the host may wait for another device.
+    expect(await poll(host)).toEqual([
+      { type: 'peer-left', reason: 'left', expiresAt: expect.any(Number) },
+    ]);
     expect((await fetch(`${server.url}/api/signal/poll`, { headers: headers(guest) })).status).toBe(
       401,
     );
+  });
+
+  it('still refuses an opaque origin everywhere but the disconnect beacon', async () => {
+    const response = await fetch(`${server.url}/api/signal/connect`, {
+      method: 'POST',
+      headers: { Origin: 'null' },
+    });
+    expect(response.status).toBe(403);
   });
 
   it('protects the cleanup endpoint with the cron secret', async () => {

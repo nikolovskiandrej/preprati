@@ -9,7 +9,12 @@ import {
   type ServerMessage,
 } from '../../shared/signaling';
 
-export type SignalingCloseReason = 'closed' | 'timeout' | 'error';
+/**
+ * Why a signaling channel closed: `ended` when the server no longer knows
+ * this connection (it went quiet for too long, e.g. a page in the background
+ * or kept in the back/forward cache), `closed` for any other orderly close.
+ */
+export type SignalingCloseReason = 'closed' | 'ended' | 'timeout' | 'error';
 
 /**
  * How eagerly a polling transport should check for messages:

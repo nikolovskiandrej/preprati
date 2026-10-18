@@ -21,6 +21,7 @@ export const testConfig: PublicConfig = {
     chunkBytes: 4 * 1024 * 1024,
   },
   attribution: { url: null },
+  linkOrigin: null,
 };
 
 export function renderWithProviders(

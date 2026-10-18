@@ -115,12 +115,18 @@ describe('signaling WebSocket', () => {
 
     const closed = await pairUp();
     closed.guest.socket.close(1001); // what browsers send when a page goes away
-    expect(await closed.host.next('peer-left')).toEqual({ type: 'peer-left', reason: 'left' });
+    expect(await closed.host.next('peer-left')).toMatchObject({
+      type: 'peer-left',
+      reason: 'left',
+    });
     closed.host.close();
 
     const dropped = await pairUp();
     dropped.guest.socket.terminate(); // no close frame: the network went away
-    expect(await dropped.host.next('peer-left')).toEqual({ type: 'peer-left', reason: 'gone' });
+    expect(await dropped.host.next('peer-left')).toMatchObject({
+      type: 'peer-left',
+      reason: 'gone',
+    });
     dropped.host.close();
   });
 

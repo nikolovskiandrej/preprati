@@ -192,10 +192,36 @@ describe('SessionManager', () => {
       { via: 'link', sessionId: host.last('session-created')!.sessionId },
       device('B'),
     );
+    sessions.lockSession(host); // files are moving
     sessions.leave(guest);
-    expect(host.last('peer-left')).toBeDefined();
+    expect(host.last('peer-left')).toEqual({ type: 'peer-left', reason: 'left' });
     expect(sessions.sessionCount).toBe(0);
     sessions.leave(guest); // idempotent
+  });
+
+  it('waits for another device when the guest leaves before anything moved', () => {
+    const sessions = manager();
+    const host = new FakePeer('h');
+    const first = new FakePeer('g1');
+    const second = new FakePeer('g2');
+    sessions.createSession(host, 'sender', device('A'));
+    const { sessionId } = host.last('session-created')!;
+    sessions.joinSession(first, { via: 'link', sessionId }, device('B'));
+    expect(sessions.joinSession(second, { via: 'link', sessionId }, device('C'))).toEqual({
+      ok: false,
+      code: 'session-full',
+    });
+    sessions.leave(first);
+    expect(host.last('peer-left')).toMatchObject({ reason: 'left', expiresAt: expect.any(Number) });
+    expect(sessions.sessionCount).toBe(1);
+    expect(sessions.joinSession(second, { via: 'link', sessionId }, device('C'))).toEqual({
+      ok: true,
+    });
+    expect(sessions.relay(first, { kind: 'candidate', candidate: null })).toEqual({
+      ok: false,
+      code: 'not-in-session',
+    });
+    expect(sessions.lockSession(second)).toEqual({ ok: false, code: 'not-allowed' });
   });
 
   it('limits concurrent sessions per IP and in total', () => {

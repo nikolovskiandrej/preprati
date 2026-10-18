@@ -216,13 +216,26 @@ describe('QuickSession relay mode', () => {
     expect(guest.state).toMatchObject({ phase: 'connecting', route: 'server' }); // still waiting
   });
 
-  it('explains it when the other device leaves a relayed session', async () => {
+  it('explains it when the other device leaves a relayed session after files moved', async () => {
     const { host, guest } = await pair('receiver');
     await until(() => host.state.phase === 'connected' && guest.state.phase === 'connected');
     expect(host.state.route).toBe('server');
+    guest.session.setFiles([new File(['moved'], 'm.txt')]);
+    guest.session.send();
+    await until(() => host.state.phase === 'awaiting-acceptance');
+    host.session.accept();
+    await until(() => host.state.phase === 'completed');
     guest.session.dispose(); // "End session" or a closed page
     await until(() => host.state.phase === 'disconnected');
     expect(host.state.error).toBe('peer-ended');
+  });
+
+  it('waits for another device when a relayed guest leaves before anything moved', async () => {
+    const { host, guest } = await pair('receiver');
+    await until(() => host.state.phase === 'connected' && guest.state.phase === 'connected');
+    guest.session.dispose();
+    await until(() => host.state.phase === 'waiting-for-peer');
+    expect(host.state).toMatchObject({ reopened: true, route: null, error: null });
   });
 
   it('doesn’t restart a completed relay transfer when a delayed proposal arrives', async () => {

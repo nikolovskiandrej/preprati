@@ -4,7 +4,7 @@
  */
 import { downloadZip } from 'client-zip';
 import { AnimatePresence, m } from 'motion/react';
-import { useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { formatPairingCode } from '../../../shared/constants';
 import type { TransferRole } from '../../../shared/signaling';
 import { useNow } from '../../app/hooks';
@@ -21,7 +21,7 @@ import {
   QrIcon,
   RelayIcon,
 } from '../../icons';
-import { saveBlob } from '../../lib/download';
+import { hasUserActivation, saveFile, type SaveOutcome } from '../../lib/download';
 import { isPreviewableImage, uniqueNames } from '../../lib/files';
 import {
   formatBytes,
@@ -117,9 +117,15 @@ export function GhostTicket() {
 export function PairingTicket({
   session,
   hostRole,
+  reopened = false,
+  later,
 }: {
   session: QuickSessionInfo;
   hostRole: TransferRole;
+  /** The device that joined left before anything was sent; the link still works. */
+  reopened?: boolean;
+  /** Below the ticket: a way to send the files as a link that works later. */
+  later?: ReactNode;
 }) {
   const { t } = useI18n();
   const now = useNow(1000);
@@ -129,6 +135,11 @@ export function PairingTicket({
 
   return (
     <div className={styles.pairing}>
+      {reopened ? (
+        <p className={`${styles.note} ${styles.reopened}`} role="status">
+          {t('quick.reopened')}
+        </p>
+      ) : null}
       <div className={styles.ticket}>
         <QrCode value={session.link} label={t('qr.alt', { purpose: t('qr.purposeSession') })} />
       </div>
@@ -160,8 +171,10 @@ export function PairingTicket({
         shareText={
           hostRole === 'receiver' ? t('qr.sessionImageTitleSend') : t('qr.sessionImageTitle')
         }
+        linkNote={t('quick.linkNote')}
       />
       <p className={styles.note}>{t('quick.keepOpen')}</p>
+      {later}
     </div>
   );
 }
@@ -557,40 +570,75 @@ export function QuickError({
   );
 }
 
-/** Files received in this session, each savable on its own or all together as .zip. */
+type Saved = Exclude<SaveOutcome, 'cancelled'>;
+
+/**
+ * Files received in this session, each savable on its own or all together
+ * as .zip. Saving happens on a tap (browsers allow nothing else) and claims
+ * no more than the browser confirms: "Save again" after a download request,
+ * "Done" only after the share sheet. `inAppBrowser`: saves through the share
+ * sheet where downloads don't work, and says that saving may fail here.
+ */
 export function ReceivedFilesList({
   files,
   tone = 'light',
+  inAppBrowser = false,
 }: {
   files: ReceivedFile[];
   tone?: 'light' | 'dark';
+  inAppBrowser?: boolean;
 }) {
   const { t, locale } = useI18n();
-  const [saved, setSaved] = useState<Set<string>>(() => new Set());
-  const [zipping, setZipping] = useState(false);
+  const [saved, setSaved] = useState<Map<string, Saved>>(() => new Map());
+  const [zip, setZip] = useState<{ blob: Blob | null; preparing: boolean }>({
+    blob: null,
+    preparing: false,
+  });
   const names = useMemo(() => uniqueNames(files.map((file) => file.name)), [files]);
 
   const keyOf = (file: ReceivedFile) => `${file.transferId}:${file.index}`;
-  const save = (file: ReceivedFile, name: string) => {
-    saveBlob(file.blob, name);
-    setSaved((current) => new Set(current).add(keyOf(file)));
+  const mark = (keys: string[], outcome: SaveOutcome) => {
+    if (outcome === 'cancelled') return;
+    setSaved((current) => {
+      const next = new Map(current);
+      for (const key of keys) next.set(key, outcome);
+      return next;
+    });
   };
+  const save = (file: ReceivedFile, name: string) => {
+    // Straight from the click: the download or share sheet needs the gesture.
+    void saveFile(file.blob, name, { type: file.type, preferShare: inAppBrowser }).then((outcome) =>
+      mark([keyOf(file)], outcome),
+    );
+  };
+  const saveZip = (blob: Blob) =>
+    void saveFile(blob, 'preprati-files.zip', {
+      type: 'application/zip',
+      preferShare: inAppBrowser,
+    }).then((outcome) => mark(files.map(keyOf), outcome));
   const saveAll = async () => {
-    setZipping(true);
+    if (zip.blob) {
+      saveZip(zip.blob);
+      return;
+    }
+    setZip({ blob: null, preparing: true });
     try {
-      const zip = await downloadZip(
+      const blob = await downloadZip(
         files.map((file, i) => ({
           name: names[i]!,
           input: file.blob,
           lastModified: new Date(file.lastModified || Date.now()),
         })),
       ).blob();
-      saveBlob(zip, 'preprati-files.zip');
-      setSaved(new Set(files.map(keyOf)));
-    } finally {
-      setZipping(false);
+      setZip({ blob, preparing: false });
+      // Still within the tap: save now. Otherwise "Save .zip" asks for one more.
+      if (hasUserActivation()) saveZip(blob);
+    } catch {
+      setZip({ blob: null, preparing: false });
     }
   };
+  const zipReady = !!zip.blob && !files.every((file) => saved.has(keyOf(file)));
+  const anySaved = [...saved.values()].includes('requested');
 
   return (
     <div className={styles.received}>
@@ -601,16 +649,20 @@ export function ReceivedFilesList({
             variant={tone === 'dark' ? 'inverse' : 'dark'}
             size="sm"
             icon={DownloadIcon}
-            loading={zipping}
+            loading={zip.preparing}
             onClick={() => void saveAll()}
           >
-            {zipping ? t('quick.preparingZip') : t('quick.saveAll')}
+            {zip.preparing
+              ? t('quick.preparingZip')
+              : zipReady
+                ? t('quick.saveAllReady')
+                : t('quick.saveAll')}
           </Button>
         ) : null}
       </div>
       <FileListFrame label={t('quick.receivedFiles')}>
         {files.map((file, i) => {
-          const isSaved = saved.has(keyOf(file));
+          const outcome = saved.get(keyOf(file));
           return (
             <FileRow
               key={keyOf(file)}
@@ -624,13 +676,17 @@ export function ReceivedFilesList({
                     <Thumbnail blob={file.blob} type={file.type} />
                   ) : null}
                   <Button
-                    variant={isSaved ? 'ghost' : 'primary'}
+                    variant={outcome ? 'ghost' : 'primary'}
                     size="sm"
-                    icon={isSaved ? CheckIcon : DownloadIcon}
+                    icon={outcome === 'shared' ? CheckIcon : DownloadIcon}
                     onClick={() => save(file, names[i]!)}
-                    aria-label={`${isSaved ? t('quick.saved') : t('quick.save')}: ${file.name}`}
+                    aria-label={`${outcome === 'requested' ? t('quick.saveAgain') : t('quick.save')}: ${file.name}`}
                   >
-                    {isSaved ? t('quick.saved') : t('quick.save')}
+                    {outcome === 'shared'
+                      ? t('quick.saveDone')
+                      : outcome === 'requested'
+                        ? t('quick.saveAgain')
+                        : t('quick.save')}
                   </Button>
                 </>
               }
@@ -638,25 +694,31 @@ export function ReceivedFilesList({
           );
         })}
       </FileListFrame>
+      {zipReady || anySaved || inAppBrowser ? (
+        <div className={styles.receivedHints} role="status">
+          {zipReady ? <p>{t('quick.zipReadyHint')}</p> : null}
+          {anySaved ? <p>{t('quick.savedHint')}</p> : null}
+          {inAppBrowser ? <p>{t('inApp.saveHintLive')}</p> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-/** Small preview for raster images; the object URL lives exactly as long as the <img>. */
+/**
+ * Small preview for raster images; the object URL lives exactly as long as the
+ * <img> (a stable ref, so re-renders don't load the image again).
+ */
 function Thumbnail({ blob, type }: { blob: Blob; type: string }) {
-  if (blob.size > 25 * 1024 * 1024) return null;
-  return (
-    <img
-      alt=""
-      className={styles.thumb}
-      width={40}
-      height={40}
-      ref={(element) => {
-        if (!element) return;
-        const objectUrl = URL.createObjectURL(blob.slice(0, blob.size, type));
-        element.src = objectUrl;
-        return () => URL.revokeObjectURL(objectUrl);
-      }}
-    />
+  const attach = useCallback(
+    (element: HTMLImageElement | null) => {
+      if (!element) return;
+      const objectUrl = URL.createObjectURL(blob.slice(0, blob.size, type));
+      element.src = objectUrl;
+      return () => URL.revokeObjectURL(objectUrl);
+    },
+    [blob, type],
   );
+  if (blob.size > 25 * 1024 * 1024) return null;
+  return <img alt="" className={styles.thumb} width={40} height={40} ref={attach} />;
 }

@@ -121,7 +121,7 @@ describe('HttpSignalingClient', () => {
       method: 'POST',
       body: JSON.stringify(credentials),
     });
-    await expect(reason).resolves.toBe('closed');
+    await expect(reason).resolves.toBe('ended');
     expect(client.isOpen).toBe(false);
   });
 
@@ -281,7 +281,7 @@ describe('HttpSignalingClient pacing', () => {
     await client.connect();
     window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
     expect(client.isOpen).toBe(false);
-    expect(closed).toEqual(['closed']);
+    expect(closed).toEqual(['ended']);
     const disconnects = vi
       .mocked(fetch)
       .mock.calls.filter(([url]) => String(url).endsWith('/api/signal/disconnect'));

@@ -46,7 +46,21 @@ const BY_CODE: Record<QuickErrorCode, Omit<QuickErrorView, 'recovery'>> = {
   'protocol-error': { title: 'errors.titles.transfer', message: 'errors.protocolError' },
   'file-read-failed': { title: 'errors.titles.transfer', message: 'errors.fileReadFailed' },
   'version-mismatch': { title: 'errors.titles.connection', message: 'errors.versionMismatch' },
+  'session-lost': { title: 'errors.titles.expired', message: 'errors.sessionLost' },
   internal: { title: 'errors.titles.transfer', message: 'errors.internal' },
+};
+
+/**
+ * What a device that opened someone's link (or typed their code) should know
+ * instead: what the link was, why it no longer works, and what to ask for.
+ */
+const FOR_GUEST: Partial<Record<QuickErrorCode, MessageKey>> = {
+  'session-not-found': 'errors.guest.sessionNotFound',
+  'session-expired': 'errors.guest.sessionExpired',
+  'session-full': 'errors.guest.sessionFull',
+  'peer-left': 'errors.guest.peerLeft',
+  'peer-ended': 'errors.guest.peerLeft',
+  'session-lost': 'errors.guest.sessionLost',
 };
 
 /** What went wrong with a failed connection attempt, in plain language. */
@@ -100,7 +114,8 @@ export function describeQuickError(
         recovery,
         connection: { canRetry: state.canRetry, canRelay: state.canRelay, diagnostics: null },
       };
-    return { ...BY_CODE[code], recovery };
+    const guestMessage = state.isHost ? undefined : FOR_GUEST[code];
+    return { ...BY_CODE[code], ...(guestMessage ? { message: guestMessage } : {}), recovery };
   }
   if (state.phase === 'failed' && state.transfer?.error) {
     // The connection is still up; only this transfer failed.

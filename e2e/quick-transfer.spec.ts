@@ -44,7 +44,7 @@ test.describe('Quick Transfer', () => {
     await expect(phone.page.getByText(/Sent! 2 files delivered to/)).toBeVisible();
 
     const saved = [];
-    // Each saved file's button turns into "Saved", so always take the first remaining "Save".
+    // Each saved file's button turns into "Save again", so always take the first remaining "Save".
     for (let i = 0; i < files.length; i++) {
       saved.push(
         await captureDownload(laptop.page, () =>
@@ -55,7 +55,8 @@ test.describe('Quick Transfer', () => {
         ),
       );
     }
-    await expect(laptop.page.getByRole('button', { name: /^Saved: / })).toHaveCount(2);
+    // The browser was asked to download each file; nothing claims they are saved.
+    await expect(laptop.page.getByRole('button', { name: /^Save again: / })).toHaveCount(2);
     expect(saved.map((s) => sha256(s.bytes)).sort()).toEqual(files.map(fileHash).sort());
 
     const zip = await captureDownload(laptop.page, () =>
@@ -196,14 +197,23 @@ test.describe('Quick Transfer', () => {
     const receiver = await newDevice(browser);
     const sender = await newDevice(browser);
     await receiver.page.goto('/receive');
-    await sender.page.goto(`/j/${await pairingCode(receiver.page)}`);
+    const code = await pairingCode(receiver.page);
+    await sender.page.goto(`/j/${code}`);
     await expect(sender.page.getByText(/Choose the files to send to/)).toBeVisible();
+    // The joining device leaves before anything was sent: the same code keeps working.
     await sender.context.close();
-    await expect(
-      receiver.page.getByText(/left the session|connection was lost|ended the session/),
-    ).toBeVisible();
-    await expect(receiver.page.getByRole('button', { name: 'Start a new session' })).toBeVisible();
+    await expect(receiver.page.getByText(/left before anything was sent/)).toBeVisible();
+    expect(await pairingCode(receiver.page)).toBe(code);
+
+    const next = await newDevice(browser);
+    await next.page.goto(`/j/${code}`);
+    await expect(next.page.getByText(/Choose the files to send to/)).toBeVisible();
+    // The device that shared the code leaves: the other one is told the link is over.
     await receiver.context.close();
+    await expect(
+      next.page.getByText(/other device closed preprati\.|connection was lost/),
+    ).toBeVisible();
+    await next.context.close();
   });
 
   test('pairing codes expire on the server, and a new session can be started', async ({
@@ -219,7 +229,7 @@ test.describe('Quick Transfer', () => {
 
     const late = await newDevice(browser);
     await late.page.goto(`${SHORT_BASE}/j/${code}`);
-    await expect(late.page.getByText(/doesn’t match an active session/)).toBeVisible();
+    await expect(late.page.getByText(/doesn’t lead to an active transfer/)).toBeVisible();
 
     await host.page.getByRole('button', { name: 'Start a new session' }).click();
     const fresh = await pairingCode(host.page);

@@ -381,3 +381,19 @@
     transition: none;
   }
 }
+
+.reopened {
+  padding: var(--space-3) var(--space-4);
+  border-radius: 14px;
+  background: rgba(255, 247, 237, 0.08);
+  color: var(--quick-text);
+}
+
+.receivedHints {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-muted, inherit);
+}

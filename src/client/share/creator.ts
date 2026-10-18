@@ -99,7 +99,11 @@ export class ShareCreator {
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
 
-  constructor(private limits: ShareLimits) {}
+  constructor(
+    private limits: ShareLimits,
+    /** The server's public origin for links (`linkOrigin`), if it names one. */
+    private readonly linkOrigin: string | null = null,
+  ) {}
 
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -221,7 +225,7 @@ export class ShareCreator {
 
       const result: ShareResult = {
         id,
-        url: appUrl(`/s/${id}#${encodeShareSecret(uploaded.secret)}`),
+        url: appUrl(`/s/${id}#${encodeShareSecret(uploaded.secret)}`, this.linkOrigin),
         expiresAt: uploaded.expiresAt,
         fileCount: files.length,
         totalBytes: uploaded.totalBytes,

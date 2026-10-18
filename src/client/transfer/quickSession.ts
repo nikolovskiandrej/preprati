@@ -108,6 +108,8 @@ export type QuickErrorCode =
   | 'protocol-error'
   | 'file-read-failed'
   | 'version-mismatch'
+  /** The server forgot this device while its page sat in the background (or was cached). */
+  | 'session-lost'
   | 'internal';
 
 type LinkPhase = Exclude<
@@ -137,6 +139,16 @@ export interface QuickState {
    * the sender to start either. Only ever true while connecting.
    */
   recovering: boolean;
+  /**
+   * Host: the device that joined left before any files moved, and the session
+   * waits for another one — the same link and code still work.
+   */
+  reopened: boolean;
+  /**
+   * Guest: the link is open on another device or in another browser right
+   * now; this one joins as soon as that one lets go (for a few minutes).
+   */
+  waitingForSlot: boolean;
   /** Files chosen by the sender that have not been offered yet. */
   pendingFiles: File[];
   transfer: TransferSnapshot | null;
@@ -186,6 +198,8 @@ const INITIAL: QuickState = {
   route: null,
   reconnecting: false,
   recovering: false,
+  reopened: false,
+  waitingForSlot: false,
   pendingFiles: [],
   transfer: null,
   rate: null,
@@ -217,6 +231,12 @@ const AUTO_RETRY_DELAY_MS = 1_000;
 const RECOVERY_WAIT_MS = 30_000;
 /** Once the data channel is open, how long the other device's `hello` may take. */
 const HELLO_TIMEOUT_MS = 15_000;
+/**
+ * A guest whose link is open elsewhere keeps asking this long — longer than
+ * the server takes to notice a page that went away without saying so.
+ */
+const SLOT_WAIT_MS = 3 * 60_000;
+const SLOT_RETRY_MS = 4_000;
 /** Relay messages kept while the relay is still being set up (only a few can be early). */
 const MAX_PENDING_RELAY_MESSAGES = 32;
 
@@ -232,7 +252,14 @@ const attemptOf = (payload: SignalPayload): number =>
   'attempt' in payload ? (payload.attempt ?? 0) : 0;
 
 type SessionTimer =
-  'setup' | 'retry-window' | 'retry-wait' | 'relay-wait' | 'auto-retry' | 'recovery-wait' | 'hello';
+  | 'setup'
+  | 'retry-window'
+  | 'retry-wait'
+  | 'relay-wait'
+  | 'auto-retry'
+  | 'recovery-wait'
+  | 'hello'
+  | 'slot';
 
 type ConnectionFailure = NonNullable<QuickState['failure']>;
 
@@ -259,6 +286,8 @@ export class QuickSession {
   private engine: FileTransport | null = null;
   private iceServers: IceServerConfig[] = [];
   private sessionId: string | null = null;
+  /** The server's public origin for the session link (`linkOrigin`), if it names one. */
+  private linkOrigin: string | null = null;
   private relaySetup: RelaySetup | null = null;
   /** Sender: own key pair, from proposing relay mode until the receiver's half arrives. */
   private relayKeys: RelayKeyPair | null = null;
@@ -282,6 +311,13 @@ export class QuickSession {
   private autoRetries = 0;
   /** Receiver: why its attempt failed, while it waits for the sender's next step. */
   private recoveryFailure: ConnectionFailure | null = null;
+  /** Files have started to move in this session (the host then locks it). */
+  private filesMoved = false;
+  /** Sender: the files of the latest offer, offered again if that device left without them. */
+  private offeredFiles: File[] = [];
+  /** Guest: what it joined, to ask again while the link is open elsewhere. */
+  private joinTarget: JoinTarget | null = null;
+  private slotWaitUntil = 0;
   private readonly timers = new Map<SessionTimer, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly options: QuickSessionOptions = {}) {
@@ -333,6 +369,7 @@ export class QuickSession {
       { ...FRESH_CONNECTION, isHost: false, role: null, session: null, peer: null, transfer: null },
       'joining',
     );
+    this.joinTarget = target;
     const client = await this.openSignaling(generation);
     if (!client) return;
     client.send({ type: 'join-session', target, device: { label: deviceLabel() } });
@@ -388,6 +425,7 @@ export class QuickSession {
     if (this.state.role !== 'sender') return false;
     const files = this.state.pendingFiles;
     engine.offer(files);
+    this.offeredFiles = files;
     this.update({ pendingFiles: [] });
     return true;
   }
@@ -611,7 +649,7 @@ export class QuickSession {
       return null;
     }
     client.onMessage((message) => this.handleServerMessage(message));
-    client.onClose(() => {
+    client.onClose((reason) => {
       if (generation !== this.generation) return;
       this.signaling = null;
       if (this.engine instanceof RelayEngine) {
@@ -624,7 +662,12 @@ export class QuickSession {
         this.update({}); // "Try again" needs signaling: refresh canRetry
         return;
       }
-      this.update({ error: 'signaling-unavailable' }, 'failed');
+      // `ended`: the server no longer knows this device (its page was in the background or
+      // cached for too long), which is not the same as not reaching the server at all.
+      this.update(
+        { error: reason === 'ended' ? 'session-lost' : 'signaling-unavailable' },
+        'failed',
+      );
     });
     return client;
   }
@@ -632,6 +675,7 @@ export class QuickSession {
   /** WebSocket unless the server asks for HTTP polling (serverless deployments). */
   private async createTransport(): Promise<SignalingTransport> {
     const config = await loadPublicConfig().catch(() => null);
+    this.linkOrigin = config?.linkOrigin ?? null;
     if (config?.quickTransfer.signaling === 'http') return new HttpSignalingClient();
     return new SignalingClient(this.options.signalingUrl ?? signalingUrl());
   }
@@ -649,7 +693,7 @@ export class QuickSession {
               id: message.sessionId,
               code: message.code,
               expiresAt: message.expiresAt,
-              link: appUrl(`/j/${message.sessionId}`),
+              link: appUrl(`/j/${message.sessionId}`, this.linkOrigin),
             },
           },
           'waiting-for-peer',
@@ -657,17 +701,22 @@ export class QuickSession {
         return;
       case 'session-joined':
         this.clearTimer('setup');
+        this.clearTimer('slot');
         this.sessionId = message.sessionId;
         this.iceServers = message.iceServers;
         this.update(
-          { role: message.role, peer: { label: message.peer.label, via: null } },
+          {
+            role: message.role,
+            peer: { label: message.peer.label, via: null },
+            waitingForSlot: false,
+          },
           message.awaitingApproval ? 'awaiting-approval' : 'peer-connected',
         );
         if (!message.awaitingApproval) this.startPeer(false);
         return;
       case 'peer-joined':
         this.update(
-          { peer: { label: message.peer.label, via: message.via } },
+          { peer: { label: message.peer.label, via: message.via }, reopened: false },
           message.needsApproval ? 'approval-required' : 'peer-connected',
         );
         if (!message.needsApproval) this.startPeer(true);
@@ -688,11 +737,21 @@ export class QuickSession {
           this.update({ peer: null }, 'waiting-for-peer');
           return;
         }
+        if (
+          this.state.isHost &&
+          message.expiresAt !== undefined &&
+          !this.filesMoved &&
+          !(message.reason === 'gone' && this.peerLink?.isOpen)
+        ) {
+          // Nothing moved yet, and the server keeps the session for the next device.
+          this.reopen(message.expiresAt);
+          return;
+        }
         if (this.engine instanceof RelayEngine) {
           // Relay mode lives on signaling: the other device leaving ends it. Leaving on
           // purpose is how a relaying device says goodbye.
           if (message.reason !== 'gone') this.peerSaidBye = true;
-          this.handlePeerGone();
+          this.handlePeerGone(true);
           return;
         }
         if (message.reason === 'gone' && this.peerLink?.isOpen) {
@@ -713,7 +772,7 @@ export class QuickSession {
           this.update({});
           return;
         }
-        this.handlePeerGone();
+        this.handlePeerGone(true);
         return;
       case 'session-expired':
         this.closeSignaling();
@@ -742,6 +801,7 @@ export class QuickSession {
   }
 
   private handleSignalingError(code: SignalingErrorCode): void {
+    if (code === 'session-full' && this.waitForSlot()) return;
     // Errors while setting up are fatal; later ones (e.g. a dropped relay) are not.
     if (this.linkPhase === 'creating-session' || this.linkPhase === 'joining') {
       this.clearTimer('setup');
@@ -751,6 +811,69 @@ export class QuickSession {
         code === 'session-expired' ? 'expired' : 'failed',
       );
     }
+  }
+
+  /**
+   * Guest: the link is open on another device or in another browser (an
+   * app's built-in browser, say, or the same link tapped twice). That page
+   * may let go — the server frees the session when it leaves before any
+   * files moved — so keep asking for a few minutes instead of failing.
+   */
+  private waitForSlot(): boolean {
+    const target = this.joinTarget;
+    if (this.linkPhase !== 'joining' || !target || !this.signaling?.isOpen) return false;
+    if (!this.slotWaitUntil) this.slotWaitUntil = Date.now() + SLOT_WAIT_MS;
+    if (Date.now() >= this.slotWaitUntil) return false;
+    this.clearTimer('setup');
+    this.update({ waitingForSlot: true });
+    const generation = this.generation;
+    this.setTimer('slot', SLOT_RETRY_MS, () => {
+      if (generation !== this.generation || this.linkPhase !== 'joining') return;
+      this.signaling?.send({ type: 'join-session', target, device: { label: deviceLabel() } });
+      this.armSetupTimeout(generation, 'joining');
+    });
+    return true;
+  }
+
+  /**
+   * Host: the device that joined left before any files moved. The server
+   * keeps the session (same link and code) until `expiresAt`, so go back to
+   * waiting for the next device; the files are offered again then.
+   */
+  private reopen(expiresAt: number): void {
+    this.releasePeer();
+    for (const timer of [
+      'retry-window',
+      'retry-wait',
+      'relay-wait',
+      'auto-retry',
+      'recovery-wait',
+    ] as const)
+      this.clearTimer(timer);
+    this.pendingSignals = [];
+    this.attempt = 0;
+    this.autoRetries = 0;
+    this.recoveryFailure = null;
+    this.peerSaidBye = false;
+    this.relayKeys = null;
+    this.relayPending = false;
+    this.relayPeerKey = null;
+    this.pendingRelayMessages = [];
+    this.offerWhenRelayReady = false;
+    const offered = this.state.transfer?.direction === 'outgoing' ? this.offeredFiles : [];
+    this.signaling?.setPace?.('normal');
+    this.update(
+      {
+        ...FRESH_CONNECTION,
+        peer: null,
+        transfer: null,
+        rate: null,
+        reopened: true,
+        pendingFiles: this.state.pendingFiles.length > 0 ? this.state.pendingFiles : offered,
+        session: this.state.session ? { ...this.state.session, expiresAt } : null,
+      },
+      'waiting-for-peer',
+    );
   }
 
   /** Hands a signal to the peer connection of its attempt (or keeps it until that exists). */
@@ -920,6 +1043,14 @@ export class QuickSession {
         return;
       case 'transfer': {
         const transfer = event.transfer;
+        if (
+          !this.filesMoved &&
+          (transfer.status === 'transferring' || transfer.status === 'completed')
+        ) {
+          // From now on this session belongs to the device in it (see reopen()).
+          this.filesMoved = true;
+          if (this.state.isHost) this.signaling?.send({ type: 'lock-session' });
+        }
         const meterKey = `${transfer.id}:${transfer.stage ?? ''}`;
         if (meterKey !== this.meterTransferId) {
           this.meter.reset();
@@ -1085,8 +1216,18 @@ export class QuickSession {
     engine.start();
   }
 
-  private handlePeerGone(): void {
+  /**
+   * The other device is gone. `ended`: the server says the session is over;
+   * otherwise only the connection said so (its channel closed), and a host
+   * whose guest left before any files moved goes back to waiting: the server
+   * keeps such a session for the next device and confirms with `peer-left`.
+   */
+  private handlePeerGone(ended = false): void {
     if (this.isTerminal()) return;
+    if (!ended && this.state.isHost && !this.filesMoved && this.signaling?.isOpen) {
+      this.reopen(this.state.session?.expiresAt ?? Date.now());
+      return;
+    }
     const error: QuickErrorCode = this.peerSaidBye
       ? 'peer-ended'
       : this.engine
@@ -1127,6 +1268,9 @@ export class QuickSession {
     this.attempt = 0;
     this.autoRetries = 0;
     this.recoveryFailure = null;
+    this.filesMoved = false;
+    this.offeredFiles = [];
+    this.slotWaitUntil = 0;
     this.sessionId = null;
     this.relayKeys = null;
     this.relayPending = false;

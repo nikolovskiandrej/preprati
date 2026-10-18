@@ -117,6 +117,16 @@ export const en = {
     keepOpen:
       'Keep this page open. The code only works while this session is live — it never stores your files.',
     expiresIn: 'Code expires in {time}',
+    linkNote:
+      'This link works only while this page stays open, so keep preprati. open until the files are delivered.',
+    reopened:
+      'The device that opened your link left before anything was sent. The same link and code still work.',
+    laterHint:
+      'Sending the link in a chat to someone who may open it later? This page has to stay open for it to work — a share link keeps working without it.',
+    laterAction: 'Make a link that works later',
+    slotBusyTitle: 'This link is open somewhere else right now',
+    slotBusyBody:
+      'Another browser or device has it open. As soon as that page is closed, this one connects — you don’t need to do anything here.',
     waiting: 'Waiting for the other device…',
     approvalTitle: 'Allow this device?',
     approvalBody: '{device} entered your code and wants to receive your files.',
@@ -163,8 +173,14 @@ export const en = {
     completedSent: 'Sent! {count, plural, one {# file} other {# files}} delivered to {device}.',
     completedReceived: '{count, plural, one {# file} other {# files}} received from {device}.',
     save: 'Save',
-    saved: 'Saved',
+    saveAgain: 'Save again',
+    saveDone: 'Done',
     saveAll: 'Save all (.zip)',
+    saveAllReady: 'Save .zip',
+    savedHint:
+      'Your browser is saving the files: look in its downloads (on a phone, also in Files → Downloads).',
+    zipReadyHint:
+      'The .zip is ready. Tap “Save .zip” — browsers save files only right after a tap.',
     preparingZip: 'Preparing .zip…',
     sendMore: 'Send more files',
     waitingForMore: 'You can receive more files while this page stays open.',
@@ -282,10 +298,17 @@ export const en = {
     download: 'Download',
     downloadName: 'Download {name}',
     downloading: 'Decrypting…',
-    saved: 'Saved',
+    save: 'Save file',
+    saveName: 'Save {name}',
+    saveAgain: 'Save again',
+    shared: 'Done',
+    readyHint: 'Ready to save. Tap “Save file” — browsers save files only right after a tap.',
+    requestedHint:
+      'Your browser is saving it: look in its downloads (on a phone, also in Files → Downloads).',
     downloadAll: 'Download all (.zip)',
     preparingAll: 'Preparing .zip… {percent}',
-    allSaved: 'All files saved',
+    saveAll: 'Save all (.zip)',
+    saveAllAgain: 'Save all again',
     cta: 'Need to send files too?',
     ctaLink: 'Try preprati.',
   },
@@ -298,6 +321,20 @@ export const en = {
       'Can’t reach the preprati. connection service. Check your internet connection and try again.',
     sessionNotFound:
       'That code or link doesn’t match an active session. Check it and try again, or ask for a new one.',
+    sessionLost:
+      'This session ended because the page was in the background or offline for too long. Start a new one to send or receive files.',
+    guest: {
+      sessionNotFound:
+        'This link or code doesn’t lead to an active transfer: the device that shared it may have closed preprati., or the transfer already happened. Check the code, or ask for a new link.',
+      sessionExpired:
+        'This link expired before it was opened: a live link only works for a few minutes while nobody uses it. Ask for a new one.',
+      sessionFull:
+        'This link is open on another device or in another browser, and it stayed busy. If that was you, carry on there. Otherwise ask for a new link.',
+      peerLeft:
+        'The other device closed preprati., so this link doesn’t work any more. Ask for a new link if you still need one.',
+      sessionLost:
+        'This link stopped working because the page was in the background or offline for too long. Open the link again, or ask for a new one.',
+    },
     sessionExpired: 'This session expired before a device joined.',
     sessionFull: 'Another device already joined this session.',
     rateLimited: 'Too many attempts. Please wait a minute and try again.',
@@ -373,6 +410,28 @@ export const en = {
       share: 'Couldn’t create the share link',
       shareLink: 'Can’t open these files',
     },
+  },
+  inApp: {
+    title: 'Open this in your browser',
+    bodyNamed:
+      '{app}’s built-in browser can’t save files to your phone. Open this page in your phone’s browser to receive them.',
+    bodyUnnamed:
+      'This app’s built-in browser may not be able to save files to your phone. Open this page in your phone’s browser to receive them.',
+    open: 'Open in browser',
+    copy: 'Copy link',
+    copied: 'Link copied. Paste it into your browser’s address bar.',
+    stepsIos:
+      'Or tap the ••• menu at the top of this screen and choose to open the page in your browser.',
+    stepsAndroid:
+      'Or tap the ⋮ menu at the top of this screen and choose “Open in Chrome” or “Open in browser”.',
+    stepsOther: 'Or copy the link and open it in your browser.',
+    stay: 'Continue here anyway',
+    stayNote: 'You can receive the files here, but saving them may not work.',
+    saveHint:
+      'This app’s built-in browser may not save files. If nothing was saved, open the link in your phone’s browser instead.',
+    // A live link is used up once files moved: only a new transfer helps.
+    saveHintLive:
+      'This app’s built-in browser may not save files. If nothing was saved, ask the sender to send them again and open the new link in your phone’s browser.',
   },
   notFound: {
     title: 'Nothing here',

@@ -1,9 +1,14 @@
 /**
  * Shared package page (/s/<id>#<key>). Fetches the encrypted package,
  * decrypts the file list in the browser and saves verified files.
+ *
+ * Opened in an app's built-in browser (a link tapped in Instagram, say),
+ * it first offers to continue in the phone's own browser, which can save
+ * files; nothing is fetched until the person decides.
  */
 import { Link } from 'wouter';
 import { useLocationHash, useNow, useOwnedStore } from '../app/hooks';
+import { InAppBrowserGate, useInAppBrowserGate } from '../features/common/InAppBrowserGate';
 import { isRetryable, RETRIEVER_MESSAGES } from '../features/share/messages';
 import { useI18n } from '../i18n';
 import { CheckIcon, DownloadIcon, ErrorIcon, LockIcon, RetryIcon } from '../icons';
@@ -17,14 +22,34 @@ import { Spinner } from '../ui/Spinner';
 import styles from './RecipientScreen.module.css';
 
 export default function RecipientScreen({ params }: { params: { id: string } }) {
+  const { t } = useI18n();
+  const gate = useInAppBrowserGate();
+  if (gate.browser && gate.open) {
+    return (
+      <div className={styles.page}>
+        <section className={styles.sheet}>
+          <p className={styles.eyebrow}>
+            <LockIcon size={18} />
+            <span>{t('recipient.eyebrow')}</span>
+          </p>
+          <InAppBrowserGate browser={gate.browser} onStay={gate.stay} tone="light" />
+        </section>
+      </div>
+    );
+  }
+  return <SharedFiles id={params.id} inAppBrowser={!!gate.browser} />;
+}
+
+/** `inAppBrowser`: saving falls back to the share sheet, and says it may not work. */
+function SharedFiles({ id, inAppBrowser }: { id: string; inAppBrowser: boolean }) {
   const { t, locale } = useI18n();
   // The key lives in the fragment; editing it in an open tab re-opens the package.
   const hash = useLocationHash();
   const [retriever, state] = useOwnedStore<RetrieverState, ShareRetriever>(() => {
-    const instance = new ShareRetriever(params.id, hash);
+    const instance = new ShareRetriever(id, hash);
     void instance.open();
     return instance;
-  }, [params.id, hash]);
+  }, [id, hash]);
   const now = useNow(60_000);
 
   const phase = state?.phase ?? 'opening-share';
@@ -83,6 +108,10 @@ export default function RecipientScreen({ params }: { params: { id: string } }) 
 
   const files = state.files;
   const zip = state.zip;
+  const save = { preferShare: inAppBrowser };
+  const anyReady = zip.status === 'ready' || files.some((file) => file.status === 'ready');
+  const anyRequested =
+    zip.status === 'requested' || files.some((file) => file.status === 'requested');
   return (
     <div className={styles.page}>
       <section className={styles.sheet}>
@@ -130,24 +159,36 @@ export default function RecipientScreen({ params }: { params: { id: string } }) 
                   }
                   action={
                     <Button
-                      variant={file.status === 'saved' ? 'ghost' : 'primary'}
+                      variant={
+                        file.status === 'requested' || file.status === 'shared'
+                          ? 'ghost'
+                          : 'primary'
+                      }
                       size="sm"
                       icon={
-                        file.status === 'saved'
+                        file.status === 'shared'
                           ? CheckIcon
                           : file.status === 'failed'
                             ? RetryIcon
                             : DownloadIcon
                       }
                       loading={downloading}
-                      onClick={() => void retriever.downloadFile(file.index)}
-                      aria-label={t('recipient.downloadName', { name: file.name })}
+                      onClick={() => void retriever.downloadFile(file.index, save)}
+                      aria-label={
+                        file.status === 'idle' || file.status === 'downloading'
+                          ? t('recipient.downloadName', { name: file.name })
+                          : t('recipient.saveName', { name: file.name })
+                      }
                     >
-                      {file.status === 'saved'
-                        ? t('recipient.saved')
-                        : file.status === 'failed'
-                          ? t('common.retry')
-                          : t('recipient.download')}
+                      {file.status === 'ready'
+                        ? t('recipient.save')
+                        : file.status === 'requested'
+                          ? t('recipient.saveAgain')
+                          : file.status === 'shared'
+                            ? t('recipient.shared')
+                            : file.status === 'failed'
+                              ? t('common.retry')
+                              : t('recipient.download')}
                     </Button>
                   }
                 />
@@ -159,18 +200,22 @@ export default function RecipientScreen({ params }: { params: { id: string } }) 
         {files.length > 1 ? (
           <div className={styles.all}>
             <Button
-              variant="dark"
+              variant={zip.status === 'requested' || zip.status === 'shared' ? 'ghost' : 'dark'}
               size="lg"
-              icon={zip.status === 'saved' ? CheckIcon : DownloadIcon}
+              icon={zip.status === 'shared' ? CheckIcon : DownloadIcon}
               loading={zip.status === 'preparing'}
-              onClick={() => void retriever.downloadAll()}
+              onClick={() => void retriever.downloadAll(save)}
               fullWidth
             >
               {zip.status === 'preparing'
                 ? t('recipient.preparingAll', { percent: formatPercent(zip.progress, locale) })
-                : zip.status === 'saved'
-                  ? t('recipient.allSaved')
-                  : t('recipient.downloadAll')}
+                : zip.status === 'ready'
+                  ? t('recipient.saveAll')
+                  : zip.status === 'requested'
+                    ? t('recipient.saveAllAgain')
+                    : zip.status === 'shared'
+                      ? t('recipient.shared')
+                      : t('recipient.downloadAll')}
             </Button>
             {zip.status === 'preparing' ? (
               <ProgressBar value={zip.progress} label={t('recipient.downloadAll')} size="sm" />
@@ -180,6 +225,14 @@ export default function RecipientScreen({ params }: { params: { id: string } }) 
                 <p>{t(RETRIEVER_MESSAGES[zip.error])}</p>
               </Notice>
             ) : null}
+          </div>
+        ) : null}
+
+        {anyReady || anyRequested || inAppBrowser ? (
+          <div className={styles.hints} role="status">
+            {anyReady ? <p>{t('recipient.readyHint')}</p> : null}
+            {anyRequested ? <p>{t('recipient.requestedHint')}</p> : null}
+            {inAppBrowser ? <p>{t('inApp.saveHint')}</p> : null}
           </div>
         ) : null}
 

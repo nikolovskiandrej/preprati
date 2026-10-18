@@ -244,7 +244,27 @@ describe('PollingSignaling', () => {
     now += PRESENCE_TTL - 1_000;
     expect(await host.poll()).toEqual([]);
     now += 2_000; // the guest's presence has lapsed, the host's was just refreshed
+    // Nothing had moved yet, so the session waits for another device.
+    expect(await host.poll()).toEqual([
+      { type: 'peer-left', reason: 'gone', expiresAt: now + PAIRING_TTL },
+    ]);
+  });
+
+  it('ends a locked session when its guest goes quiet', async () => {
+    const { host, created } = await hostSession('receiver');
+    const guest = await device();
+    await guest.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Phone'),
+    });
+    await host.poll();
+    await host.send({ type: 'lock-session' }); // files are moving
+    now += PRESENCE_TTL - 1_000;
+    expect(await host.poll()).toEqual([]);
+    now += 2_000; // the guest's presence has lapsed, the host's was just refreshed
     expect(await host.poll()).toEqual([{ type: 'peer-left', reason: 'gone' }]);
+    expect(await kv.getJson(`sig:s:${created.sessionId}`)).toBeNull();
   });
 
   it('reports an explicit disconnect to the other device', async () => {
@@ -257,8 +277,88 @@ describe('PollingSignaling', () => {
     });
     await host.poll();
     await guest.leave();
-    expect(await host.poll()).toEqual([{ type: 'peer-left', reason: 'left' }]);
+    expect(await host.poll()).toEqual([
+      { type: 'peer-left', reason: 'left', expiresAt: now + PAIRING_TTL },
+    ]);
     expect(await signaling.authenticate(guest.connectionId, guest.token)).toBeNull();
+  });
+
+  it('lets another device use the same link and code when the first left before anything moved', async () => {
+    const { host, created } = await hostSession('sender');
+    // Opened first in an app's built-in browser (or the wrong device), then closed.
+    const first = await device('198.51.100.7');
+    await first.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Instagram'),
+    });
+    const second = await device('198.51.100.8');
+    await second.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Phone · Safari'),
+    });
+    expect(await second.poll()).toEqual([{ type: 'error', code: 'session-full' }]);
+    const [hostSawFirst] = await advance(50_000, host, first, second);
+    await first.leave();
+    // Past the original pairing deadline (60 s): leaving started a fresh pairing window.
+    const [hostSawLater] = await advance(50_000, host, second);
+    const hostSaw = [...hostSawFirst!, ...hostSawLater!];
+    await second.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Phone · Safari'),
+    });
+    expect(await second.poll()).toEqual([
+      expect.objectContaining({ type: 'session-joined', awaitingApproval: false }),
+    ]);
+    expect([...hostSaw, ...(await host.poll())].map((m) => m.type)).toEqual([
+      'peer-joined',
+      'peer-left',
+      'peer-joined',
+    ]);
+    // Signals now go to the new guest only.
+    await host.send({ type: 'signal', payload: { kind: 'candidate', candidate: null } });
+    expect(await second.poll()).toEqual([
+      { type: 'signal', payload: { kind: 'candidate', candidate: null } },
+    ]);
+    // The code works again too, for a device that joins by typing it.
+    await second.leave();
+    const third = await device('198.51.100.9');
+    await third.send({
+      type: 'join-session',
+      target: { via: 'code', code: created.code },
+      device: label('Tablet'),
+    });
+    expect(await third.poll()).toEqual([
+      expect.objectContaining({ type: 'session-joined', awaitingApproval: true }),
+    ]);
+  });
+
+  it('ends a locked session when its guest leaves, so the link can’t be used twice', async () => {
+    const { host, created } = await hostSession('sender');
+    const guest = await device('198.51.100.7');
+    await guest.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Phone'),
+    });
+    await host.poll();
+    await guest.send({ type: 'lock-session' }); // only the host may lock
+    expect(await guest.poll()).toEqual([
+      expect.objectContaining({ type: 'session-joined' }),
+      { type: 'error', code: 'not-allowed' },
+    ]);
+    await host.send({ type: 'lock-session' });
+    await guest.leave();
+    expect(await host.poll()).toEqual([{ type: 'peer-left', reason: 'left' }]);
+    const late = await device('198.51.100.8');
+    await late.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Other'),
+    });
+    expect(await late.poll()).toEqual([{ type: 'error', code: 'session-not-found' }]);
   });
 
   it('frees the slot when a guest awaiting approval walks away', async () => {
@@ -476,6 +576,7 @@ describe('PollingSignaling', () => {
         ['recovery', 'attempt-failed'],
         ['recovery', 'gave-up'],
         ['peer-left', 'left'],
+        ['session-reopened', 'left'],
       ],
     );
     const tags = new Set(events.map(([, details]) => details.session));

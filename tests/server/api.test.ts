@@ -30,6 +30,7 @@ describe('HTTP API', () => {
     });
     expect(config.quickTransfer.pairingTtlSeconds).toBe(600);
     expect(config.attribution.url).toBe('https://notea.example/');
+    expect(config.linkOrigin).toBeNull(); // links use the page's own origin
     expect(JSON.stringify(config)).not.toMatch(/secret|password|storage_dir|STORAGE/i);
     expect(response.headers.get('cache-control')).toBe('no-store');
   });

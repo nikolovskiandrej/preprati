@@ -8,7 +8,7 @@
  *   sig:c:<conn>   connection (token hash, IP, session membership) — TTL = presence window
  *   sig:i:<conn>   inbox of numbered ServerMessages for that connection
  *   sig:n:<conn>   the inbox's message counter
- *   sig:s:<id>     session (host, role, code, pairing deadline)    — TTL = max lifetime
+ *   sig:s:<id>     session (host, role, code, pairing deadline, locked) — TTL = max lifetime
  *   sig:g:<id>     guest slot, claimed atomically with SET NX
  *   sig:a:<id>     "approved" flag (paired)
  *   sig:k:<code>   pairing code → session id
@@ -21,6 +21,13 @@
  * There are no timers: pairing expiry and vanished peers are detected lazily
  * when the remaining device polls. Every key has a TTL, so abandoned state
  * disappears.
+ *
+ * A guest that leaves (or goes silent) before any files moved doesn't end the
+ * session: it waits for another device again, with the same link and code —
+ * a link opened first in an app's built-in browser, a reloaded page, or the
+ * wrong device must not use it up. Once the host reports that files are
+ * moving (`lock-session`), the guest's departure ends the session, so one
+ * link never delivers the files to a second device.
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { randomId, randomSecret } from '../../shared/encoding';
@@ -54,6 +61,8 @@ interface SessionRecord {
   hostDevice: DeviceInfo;
   createdAt: number;
   pairingExpiresAt: number;
+  /** Files have moved: the guest's departure ends the session. */
+  locked?: boolean;
 }
 
 interface GuestRecord {
@@ -187,6 +196,9 @@ export class PollingSignaling {
         return conn;
       case 'decline-peer':
         await this.decline(conn);
+        return conn;
+      case 'lock-session':
+        await this.lock(conn);
         return conn;
       case 'signal':
         await this.relay(conn, message.payload);
@@ -403,6 +415,17 @@ export class PollingSignaling {
     if (this.now() >= session.pairingExpiresAt) await this.expire(session);
   }
 
+  private async lock(conn: ConnRecord): Promise<void> {
+    const context = await this.hostContext(conn);
+    if (!context || context.session.locked) return;
+    await this.kv.setJson(
+      K.session(context.session.id),
+      { ...context.session, locked: true },
+      { ttlMs: this.options.maxLifetimeMs },
+    );
+    this.log('session-locked', { session: sessionTag(context.session.id) });
+  }
+
   private async relay(conn: ConnRecord, payload: SignalPayload): Promise<void> {
     const target = await this.relayTarget(conn);
     if (!target) return;
@@ -452,9 +475,44 @@ export class PollingSignaling {
       await this.send(session.hostConn, { type: 'peer-left', reason: 'left' });
       return;
     }
+    if (conn.id !== session.hostConn && guest?.conn === conn.id && !session.locked) {
+      await this.reopen(session, guest, 'left');
+      return;
+    }
     const other = conn.id === session.hostConn ? guest?.conn : session.hostConn;
     if (other) await this.send(other, { type: 'peer-left', reason: 'left' });
     await this.destroy(session, guest);
+  }
+
+  /**
+   * The guest left before any files moved: the session waits for another
+   * device again, with the same link and code and a fresh pairing window.
+   */
+  private async reopen(
+    session: SessionRecord,
+    guest: GuestRecord,
+    reason: 'left' | 'gone',
+  ): Promise<void> {
+    const pairingExpiresAt = Math.max(
+      session.pairingExpiresAt,
+      this.now() + this.options.pairingTtlMs,
+    );
+    await this.removeGuest(session, guest);
+    await this.kv.del(K.approved(session.id));
+    await this.kv.setJson(
+      K.session(session.id),
+      { ...session, pairingExpiresAt },
+      { ttlMs: this.options.maxLifetimeMs },
+    );
+    await this.kv.setJson(K.code(session.code), session.id, {
+      ttlMs: pairingExpiresAt - this.now() + APPROVAL_WINDOW_MS,
+    });
+    this.log('session-reopened', { session: sessionTag(session.id), reason });
+    await this.send(session.hostConn, {
+      type: 'peer-left',
+      reason,
+      expiresAt: pairingExpiresAt,
+    });
   }
 
   /** Detects pairing expiry and vanished peers for the polling connection. */
@@ -479,7 +537,9 @@ export class PollingSignaling {
       if (!guest) return;
       if (!(await this.kv.exists(K.conn(guest.conn)))) {
         this.log('peer-left', { session: sessionTag(id), reason: 'gone', by: 'guest' });
-        if (approved) {
+        if (approved && !session.locked) {
+          await this.reopen(session, guest, 'gone');
+        } else if (approved) {
           await this.send(conn.id, { type: 'peer-left', reason: 'gone' });
           await this.destroy(session, guest);
         } else {

@@ -2,6 +2,11 @@
  * Quick Transfer — joining device. Reached by scanning a session QR code
  * (/j/<session id>) or by typing a pairing code (/j/<code>). The role is
  * decided by the host: if it receives, we send; if it sends, we receive.
+ *
+ * A link tapped in Instagram & co. opens in the app's built-in browser,
+ * which can't save files. That page first offers the phone's own browser and
+ * doesn't join until the person decides, so the real browser gets the
+ * session (a session takes one device at a time).
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useLocation } from 'wouter';
@@ -14,6 +19,7 @@ import type { JoinTarget } from '../../shared/signaling';
 import { useConfig } from '../app/config';
 import { useLeaveWarning, useOwnedStore } from '../app/hooks';
 import { FlowHeader } from '../features/common/FlowHeader';
+import { InAppBrowserGate, useInAppBrowserGate } from '../features/common/InAppBrowserGate';
 import { describeQuickError } from '../features/quick/errors';
 import {
   ConnectingStatus,
@@ -57,6 +63,7 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
   const [composing, setComposing] = useState(false);
   const { config } = useConfig();
   const shareAvailable = config?.share.enabled === true;
+  const gate = useInAppBrowserGate();
 
   const phase = state?.phase ?? 'idle';
   const role = state?.role ?? null;
@@ -69,8 +76,8 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
   useSessionWakeLock(state);
 
   useEffect(() => {
-    if (session && target && phase === 'idle') void session.join(target);
-  }, [session, target, phase]);
+    if (session && target && phase === 'idle' && !gate.open) void session.join(target);
+  }, [session, target, phase, gate.open]);
 
   const sendNow = () => {
     if (!session) return;
@@ -108,6 +115,20 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
   const live = renderLive();
 
   function renderLive(): { key: string; node: ReactNode } {
+    if (gate.browser && gate.open) {
+      return {
+        key: 'in-app',
+        node: <InAppBrowserGate browser={gate.browser} onStay={gate.stay} tone="dark" />,
+      };
+    }
+    if (state?.waitingForSlot && phase === 'joining') {
+      return {
+        key: 'slot',
+        node: (
+          <StatusBlock busy title={t('quick.slotBusyTitle')} detail={t('quick.slotBusyBody')} />
+        ),
+      };
+    }
     if (!state || !session || phase === 'idle' || phase === 'joining') {
       return { key: 'joining', node: <StatusBlock busy title={t('join.joining')} /> };
     }
@@ -422,7 +443,7 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
       ) : null}
       {state && state.received.length > 0 ? (
         <div className={styles.below}>
-          <ReceivedFilesList files={state.received} />
+          <ReceivedFilesList files={state.received} inAppBrowser={!!gate.browser} />
         </div>
       ) : null}
     </div>

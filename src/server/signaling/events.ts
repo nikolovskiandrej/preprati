@@ -17,6 +17,8 @@ export type SignalingEvent =
   | 'peer-declined'
   | 'recovery'
   | 'peer-left'
+  | 'session-locked'
+  | 'session-reopened'
   | 'session-expired'
   | 'session-closed';
 

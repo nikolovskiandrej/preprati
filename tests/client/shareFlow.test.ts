@@ -10,8 +10,15 @@ import { storagePrefixFor } from '../../src/server/shares/shareService';
 import { startTestServer, type TestServer } from '../helpers/server';
 
 const saved: Array<{ blob: Blob; name: string }> = [];
+/** Whether the tap that started a download still counts when the file is ready. */
+const activation = { active: false };
 vi.mock('../../src/client/lib/download', () => ({
   saveBlob: (blob: Blob, name: string) => saved.push({ blob, name }),
+  saveFile: async (blob: Blob, name: string) => {
+    saved.push({ blob, name });
+    return 'requested';
+  },
+  hasUserActivation: () => activation.active,
   canShareFiles: () => false,
 }));
 
@@ -72,6 +79,28 @@ async function createShare(server: TestServer, files: File[]) {
   const url = new URL(state.result!.url);
   return { creator, url, id: url.pathname.split('/').pop()!, key: url.hash.slice(1) };
 }
+
+describe('share links', () => {
+  it('use the public origin the server names, key in the fragment', async () => {
+    const server = await startTestServer({ ALLOWED_ORIGINS: ORIGIN });
+    vi.stubEnv('VITE_API_BASE_URL', server.url);
+    Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
+    try {
+      const creator = new ShareCreator(limits(server), 'https://preprati.example');
+      creator.addFiles([randomFile('scan.pdf', 5_000, 'application/pdf').file]);
+      creator.requestConfirmation();
+      await creator.confirm();
+      const url = new URL(creator.getSnapshot().result!.url);
+      expect(url.origin).toBe('https://preprati.example');
+      expect(url.pathname).toMatch(/^\/s\/[A-Za-z0-9_-]+$/);
+      expect(url.hash.length).toBeGreaterThan(20);
+      creator.dispose();
+    } finally {
+      vi.unstubAllEnvs();
+      await server.close();
+    }
+  });
+});
 
 describe('Share Files (creator → server → recipient)', () => {
   let server: TestServer;
@@ -139,9 +168,19 @@ describe('Share Files (creator → server → recipient)', () => {
     expect(state.phase).toBe('ready-to-download');
     expect(state.files.map((f) => f.name)).toEqual(['квартален-извештај.pdf', 'holiday-photo.jpg']);
 
+    // Decrypting took longer than the browser lets a tap count: the file waits for a "Save" tap.
+    activation.active = false;
     await retriever.downloadFile(0);
+    expect(saved).toHaveLength(0);
+    expect(retriever.getSnapshot().files[0]).toMatchObject({ status: 'ready', progress: 1 });
+    await retriever.downloadFile(0); // the "Save file" tap
+    // Quick enough for the tap to still count: saved right away.
+    activation.active = true;
     await retriever.downloadFile(1);
+    activation.active = false;
     expect(saved.map((s) => s.name)).toEqual(['квартален-извештај.pdf', 'holiday-photo.jpg']);
+    // Saving only asked the browser to download: nothing claims the files were saved.
+    expect(retriever.getSnapshot().files.map((f) => f.status)).toEqual(['requested', 'requested']);
     expect(new Uint8Array(await saved[0]!.blob.arrayBuffer())).toEqual(a.bytes);
     expect(new Uint8Array(await saved[1]!.blob.arrayBuffer())).toEqual(b.bytes);
     retriever.dispose();

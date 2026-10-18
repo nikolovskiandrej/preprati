@@ -92,11 +92,102 @@ describe('QuickSession', () => {
     expect(guest.transport.paces.at(-1)).toBe('quiet');
   });
 
-  it('ends the session at once when the other device leaves on purpose', async () => {
+  it('waits for another device when the other one leaves before anything was sent', async () => {
     const { host, guest } = await pairDevices();
+    const link = host.state.session!.link;
     server.sessions.leave(guest.transport.peer, 'left'); // e.g. its page was closed
     await settle(50);
+    // The same link and code keep working for the next device.
+    expect(host.state).toMatchObject({ phase: 'waiting-for-peer', reopened: true, peer: null });
+    expect(host.state.session!.link).toBe(link);
+    const next = device();
+    await next.session.join({ via: 'link', sessionId: host.state.session!.id });
+    await settle();
+    expect(next.state.phase).toBe('connected');
+    expect(host.state).toMatchObject({ phase: 'connected', reopened: false });
+  });
+
+  it('ends the session at once when the other device leaves after files moved', async () => {
+    const { host, guest } = await pairDevices();
+    guest.session.setFiles([new File(['delivered'], 'a.txt')]);
+    guest.session.send();
+    await settle();
+    host.session.accept();
+    await settle(500);
+    expect(host.state.phase).toBe('completed');
+    expect(server.sessions.sessionCount).toBe(1);
+    server.sessions.leave(guest.transport.peer, 'left');
+    await settle(50);
     expect(host.state).toMatchObject({ phase: 'disconnected', error: 'connection-lost' });
+    // The link can't hand the files to a second device.
+    expect(server.sessions.sessionCount).toBe(0);
+  });
+
+  it('offers a sending host’s files again to the next device if the first left without them', async () => {
+    const host = (() => {
+      let transport: LoopbackTransport | null = null;
+      const session = new QuickSession({
+        autoOffer: true,
+        createSignaling: () => (transport = server.transport()),
+      });
+      sessions.push(session);
+      return {
+        session,
+        get state() {
+          return session.getSnapshot();
+        },
+        get transport() {
+          return transport!;
+        },
+      };
+    })();
+    host.session.setFiles([new File(['report'], 'report.pdf')]);
+    await host.session.host('sender');
+    await settle();
+    const first = device(); // e.g. the sender tapped its own link in the chat
+    await first.session.join({ via: 'link', sessionId: host.state.session!.id });
+    await settle();
+    expect(first.state.phase).toBe('awaiting-acceptance');
+    first.session.dispose(); // closed without accepting
+    await settle();
+    expect(host.state).toMatchObject({ phase: 'waiting-for-peer', transfer: null });
+    const second = device();
+    await second.session.join({ via: 'link', sessionId: host.state.session!.id });
+    await settle();
+    expect(second.state.phase).toBe('awaiting-acceptance');
+    expect(second.state.transfer?.files.map((f) => f.name)).toEqual(['report.pdf']);
+  });
+
+  it('joins as soon as a link that is open elsewhere is let go', async () => {
+    const host = device();
+    await host.session.host('receiver');
+    await settle();
+    const first = device(); // e.g. opened in an app's built-in browser first
+    await first.session.join({ via: 'link', sessionId: host.state.session!.id });
+    await settle();
+    const second = device();
+    await second.session.join({ via: 'link', sessionId: host.state.session!.id });
+    await settle();
+    expect(second.state).toMatchObject({ phase: 'joining', waitingForSlot: true, error: null });
+    await settle(30_000); // still waiting, quietly
+    expect(second.state).toMatchObject({ phase: 'joining', waitingForSlot: true });
+    first.session.dispose();
+    await settle(5_000);
+    expect(second.state).toMatchObject({ phase: 'connected', waitingForSlot: false });
+    expect(host.state.phase).toBe('connected');
+  });
+
+  it('stops waiting for a link that stays busy, and says so', async () => {
+    const host = device();
+    await host.session.host('receiver');
+    await settle();
+    const first = device();
+    await first.session.join({ via: 'link', sessionId: host.state.session!.id });
+    await settle();
+    const second = device();
+    await second.session.join({ via: 'link', sessionId: host.state.session!.id });
+    await settle(3 * 60_000 + 5_000);
+    expect(second.state).toMatchObject({ phase: 'failed', error: 'session-full' });
   });
 
   it('keeps a working direct connection when the other device only went quiet', async () => {
@@ -262,9 +353,14 @@ describe('QuickSession', () => {
 
   it('reports a lost connection when a dropped path never comes back', async () => {
     const { host, guest } = await pairDevices();
+    guest.session.setFiles([new File(['first'], 'first.txt')]);
+    guest.session.send();
+    await settle();
+    host.session.accept();
+    await settle(500);
     network.dropLinks();
     await settle(44_000);
-    expect(host.state).toMatchObject({ phase: 'connected', reconnecting: true });
+    expect(host.state).toMatchObject({ phase: 'completed', reconnecting: true });
     await settle(2_000);
     for (const device of [host, guest]) {
       expect(device.state).toMatchObject({
@@ -273,6 +369,15 @@ describe('QuickSession', () => {
         reconnecting: false,
       });
     }
+  });
+
+  it('keeps the link usable when the connection is lost before anything was sent', async () => {
+    const { host, guest } = await pairDevices();
+    network.dropLinks();
+    await settle(46_000);
+    expect(guest.state).toMatchObject({ phase: 'disconnected', error: 'connection-lost' });
+    // The guest can open the same link again (from another network, say).
+    expect(host.state).toMatchObject({ phase: 'waiting-for-peer', reopened: true });
   });
 
   it('fails a session the server never confirms', async () => {
@@ -298,17 +403,15 @@ describe('QuickSession', () => {
     expect(guest.state.failure?.cause).toBe('no-remote-details');
   });
 
-  it('keeps explaining the failure when the other device leaves', async () => {
+  it('frees the link when the other device leaves after a failed attempt', async () => {
     network.canConnect = () => false;
     const { host, guest } = await pairDevices();
     await settle(1_500);
+    expect(host.state.phase).toBe('failed');
     guest.session.dispose();
     await settle();
-    expect(host.state).toMatchObject({
-      phase: 'failed',
-      error: 'connection-failed',
-      canRetry: false,
-    });
+    // Nothing moved, so the link and code work again for another device (or network).
+    expect(host.state).toMatchObject({ phase: 'waiting-for-peer', reopened: true, error: null });
   });
 
   it('stops waiting for the sender after a while if it never takes the next step', async () => {

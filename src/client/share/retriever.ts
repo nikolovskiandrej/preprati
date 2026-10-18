@@ -14,7 +14,7 @@ import { RANDOM_ID_PATTERN } from '../../shared/constants';
 import { isSecureContextAvailable } from '../lib/env';
 import { fileKind, sanitizeFileName, uniqueNames, type FileKind } from '../lib/files';
 import { HttpError, withRetry } from '../lib/http';
-import { saveBlob } from '../lib/download';
+import { hasUserActivation, saveFile, type SaveOutcome } from '../lib/download';
 import { getChunk, getManifest, getShareInfo } from './api';
 import {
   decodeShareSecret,
@@ -53,7 +53,12 @@ export interface RecipientFile {
   size: number;
   lastModified: number;
   kind: FileKind;
-  status: 'idle' | 'downloading' | 'saved' | 'failed';
+  /**
+   * `ready`: decrypted and verified, waiting for a tap to save (browsers only
+   * save files right after a tap). `requested`: the browser was asked to
+   * download it — it doesn't confirm more. `shared`: saved via the share sheet.
+   */
+  status: 'idle' | 'downloading' | SaveStatus | 'failed';
   /** 0..1 while downloading. */
   progress: number;
   error: RetrieverErrorCode | null;
@@ -69,13 +74,15 @@ export interface RetrievedFile {
   blob: Blob;
 }
 
+type SaveStatus = 'ready' | Exclude<SaveOutcome, 'cancelled'>;
+
 export interface RetrieverState {
   phase: RetrieverPhase;
   expiresAt: number | null;
   totalBytes: number;
   files: RecipientFile[];
   zip: {
-    status: 'idle' | 'preparing' | 'saved' | 'failed';
+    status: 'idle' | 'preparing' | SaveStatus | 'failed';
     progress: number;
     error: RetrieverErrorCode | null;
   };
@@ -103,6 +110,8 @@ export class ShareRetriever {
   private readonly cache = new Map<number, Uint8Array<ArrayBuffer>>();
   private readonly controller = new AbortController();
   private disposed = false;
+  /** Decrypted files (and the .zip of all) kept for "Save" and "Save again". */
+  private readonly prepared = new Map<number | 'zip', Blob>();
 
   constructor(
     private readonly shareId: string,
@@ -176,25 +185,49 @@ export class ShareRetriever {
   }
 
   /** Decrypts one file completely, then hands it to the browser's download manager. */
-  async downloadFile(index: number): Promise<void> {
+  /**
+   * Downloads, decrypts and verifies one file, then saves it — at once while
+   * the tap that started it still counts, otherwise on the next tap (the
+   * file is then `ready`). Call it from a click. `preferShare`: save through
+   * the share sheet (an app's built-in browser can't download).
+   */
+  async downloadFile(index: number, { preferShare = false } = {}): Promise<void> {
     const file = this.state.files[index];
     if (!file || file.status === 'downloading' || this.state.phase !== 'ready-to-download') return;
+    const prepared = this.prepared.get(index);
+    if (prepared) {
+      await this.saveFileAt(index, prepared, preferShare);
+      return;
+    }
     this.patchFile(index, { status: 'downloading', progress: 0, error: null });
     try {
       const blob = await this.decryptFile(index, (progress) => this.patchFile(index, { progress }));
-      saveBlob(blob, file.name);
-      this.patchFile(index, { status: 'saved', progress: 1 });
+      if (this.disposed) return;
+      this.prepared.set(index, blob);
+      if (hasUserActivation()) await this.saveFileAt(index, blob, preferShare);
+      else this.patchFile(index, { status: 'ready', progress: 1 });
     } catch (error) {
       if (this.disposed) return;
       this.patchFile(index, { status: 'failed', progress: 0, error: retrieverErrorOf(error) });
     }
   }
 
-  /** Builds a .zip of every file (each one verified) and saves it. */
-  async downloadAll(): Promise<void> {
+  private async saveFileAt(index: number, blob: Blob, preferShare: boolean): Promise<void> {
+    const file = this.state.files[index]!;
+    const outcome = await saveFile(blob, file.name, { type: file.type, preferShare });
+    this.patchFile(index, { status: outcome === 'cancelled' ? 'ready' : outcome, progress: 1 });
+  }
+
+  /** Builds a .zip of every file (each one verified) and saves it, like `downloadFile`. */
+  async downloadAll({ preferShare = false } = {}): Promise<void> {
     if (this.state.phase !== 'ready-to-download' || this.state.zip.status === 'preparing') return;
     if (this.state.files.length === 1) {
-      await this.downloadFile(0);
+      await this.downloadFile(0, { preferShare });
+      return;
+    }
+    const prepared = this.prepared.get('zip');
+    if (prepared) {
+      await this.saveZip(prepared, preferShare);
       return;
     }
     const total = Math.max(1, this.state.totalBytes);
@@ -207,12 +240,24 @@ export class ShareRetriever {
           }),
         ),
       ).blob();
-      saveBlob(zip, 'preprati-files.zip');
-      this.update({ zip: { status: 'saved', progress: 1, error: null } });
+      if (this.disposed) return;
+      this.prepared.set('zip', zip);
+      if (hasUserActivation()) await this.saveZip(zip, preferShare);
+      else this.update({ zip: { status: 'ready', progress: 1, error: null } });
     } catch (error) {
       if (this.disposed) return;
       this.update({ zip: { status: 'failed', progress: 0, error: retrieverErrorOf(error) } });
     }
+  }
+
+  private async saveZip(zip: Blob, preferShare: boolean): Promise<void> {
+    const outcome = await saveFile(zip, 'preprati-files.zip', {
+      type: 'application/zip',
+      preferShare,
+    });
+    this.update({
+      zip: { status: outcome === 'cancelled' ? 'ready' : outcome, progress: 1, error: null },
+    });
   }
 
   /**
@@ -266,6 +311,7 @@ export class ShareRetriever {
     this.disposed = true;
     this.controller.abort();
     this.cache.clear();
+    this.prepared.clear();
     this.listeners.clear();
   }
 

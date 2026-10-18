@@ -11,7 +11,9 @@ preprati. is a browser-based file transfer product with two clearly separated mo
 | Server sees             | Device labels and WebRTC negotiation only (in relay mode, also ciphertext). No file names or contents                                                                              | Ciphertext and minimal metadata. No key, file names, types or individual sizes |
 | Sender must stay online | Yes                                                                                                                                                                                | No — until expiry (default 24 h) or deletion                                   |
 
-Both modes have **Copy QR Code** (a real PNG on the clipboard, with an honest fallback to downloading the PNG), **Download QR Code**, **Copy Link** and native **Share**.
+Both modes have **Copy QR Code** (a real PNG on the clipboard, with an honest fallback to downloading the PNG), **Download QR Code**, **Copy Link** and native **Share**. The QR code, the copied link and the shared link are the same URL. A Quick Transfer link works only while the sending page stays open, and the page says so. For someone who will open the link later, **Make a link that works later** switches to Share Files.
+
+Links opened inside an app's built-in browser (Instagram, Facebook, TikTok, Messenger…) first get an **Open in browser** screen, because those browsers can't save files. One tap hands the same URL, fragment included, to the phone's browser (an Android intent, or Safari's own link on iOS 17+). The screen also offers the app's menu and **Copy link**, or carrying on there anyway. Nothing joins or downloads until the person decides, so the real browser gets the session. Saving never claims more than the browser confirms: the button says **Save again** and points to the downloads, not "Saved".
 
 ---
 
@@ -134,11 +136,13 @@ The original brand references (`Современ концепт за бренд 
 
 ## Browser support
 
-Current Chrome, Edge, Firefox and Safari (desktop and mobile). Quick Transfer needs WebRTC data channels. Share Files and Copy QR Code need a secure context (HTTPS or localhost). Where image copying isn't available, the app says so and offers the PNG download; where native sharing isn't available, it copies the link and says so.
+Current Chrome, Edge, Firefox and Safari (desktop and mobile). Apps' built-in browsers (Instagram & co.) can run the pages but usually can't save files, so they offer the phone's browser first (see above). Quick Transfer needs WebRTC data channels. Share Files and Copy QR Code need a secure context (HTTPS or localhost). Where image copying isn't available, the app says so and offers the PNG download; where native sharing isn't available, it copies the link and says so.
 
 ## Known limitations
 
 - Interrupted transfers and uploads restart from the beginning (no resume).
+- Inside an app's built-in browser, saving is up to the app: an Android web view hands the download to the app, which can't fetch the page's in-memory file, and iOS web views may ignore it. Where the share sheet takes files, the page uses that instead. Otherwise the person has to use **Open in browser**, the app's menu or **Copy link**. For a Quick Transfer whose files already arrived in such a browser, that means asking the sender to send again, because the link is used up once files have moved.
+- A Quick Transfer link stops working once the sending page is closed, and expires if nobody opens it within 10 minutes. Share links work without the sender until they expire (24 hours by default).
 - Received/downloaded files are assembled as browser Blobs before saving, so the receiving browser's memory and disk bound very large files.
 - On a long-lived server, signaling state and rate limits are in memory: one instance (or sticky sessions) per deployment. The serverless profile keeps this state in Redis instead.
 - On Vercel's Hobby plan, share sizes are capped lower (100 MB in the setup above), Blob operations are budgeted, and the cleanup cron runs daily. Expiry is still enforced on every request.

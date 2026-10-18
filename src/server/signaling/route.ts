@@ -161,6 +161,11 @@ export function registerSignalingRoute(
           if (!result.ok) peer.send({ type: 'error', code: result.code });
           return;
         }
+        case 'lock-session': {
+          const result = sessions.lockSession(peer);
+          if (!result.ok) peer.send({ type: 'error', code: result.code });
+          return;
+        }
         case 'signal': {
           const result = sessions.relay(peer, message.payload);
           if (!result.ok) peer.send({ type: 'error', code: result.code });

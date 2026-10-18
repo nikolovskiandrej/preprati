@@ -50,7 +50,9 @@ function buildCsp(
   config: Pick<ServerConfig, 'publicOrigin' | 'allowedOrigins' | 'env'>,
   secure: boolean,
 ): string {
-  const connect = new Set<string>(["'self'"]);
+  // blob: — this page's own object URLs (received files); mobile Chrome checks loading a
+  // blob: image against connect-src, so without it previews of received photos stay empty.
+  const connect = new Set<string>(["'self'", 'blob:']);
   const host = request.headers.host;
   if (host && /^[A-Za-z0-9.:[\]-]+$/.test(host)) {
     connect.add(`${secure ? 'wss' : 'ws'}://${host}`);

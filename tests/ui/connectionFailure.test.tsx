@@ -42,6 +42,8 @@ function failedState(cause: FailureCause, overrides: Partial<QuickState> = {}): 
     route: null,
     reconnecting: false,
     recovering: false,
+    reopened: false,
+    waitingForSlot: false,
     pendingFiles: [],
     transfer: null,
     rate: null,

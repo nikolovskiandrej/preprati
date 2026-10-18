@@ -19,9 +19,13 @@ export function signalingUrl(): string {
   return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}${SIGNALING_PATH}`;
 }
 
-/** Absolute URL of a path on this app (used for QR codes and share links). */
-export function appUrl(path: string): string {
-  return new URL(path, window.location.origin).toString();
+/**
+ * Absolute URL of a path on this app (used for QR codes and share links): on
+ * `origin` when the server names a public one (`linkOrigin` in the runtime
+ * config), on this page's origin otherwise.
+ */
+export function appUrl(path: string, origin?: string | null): string {
+  return new URL(path, origin ?? window.location.origin).toString();
 }
 
 /** Web Crypto and the async Clipboard API require a secure context (HTTPS or localhost). */

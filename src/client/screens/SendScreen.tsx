@@ -208,7 +208,26 @@ export default function SendScreen() {
         return { key: 'creating', node: <StatusBlock busy title={t('quick.creating')} /> };
       case 'waiting-for-peer':
         return state.session
-          ? { key: 'pairing', node: <PairingTicket session={state.session} hostRole="sender" /> }
+          ? {
+              key: 'pairing',
+              node: (
+                <PairingTicket
+                  session={state.session}
+                  hostRole="sender"
+                  reopened={state.reopened}
+                  later={
+                    shareAvailable && files.length > 0 ? (
+                      <div className={styles.later}>
+                        <p>{t('quick.laterHint')}</p>
+                        <Button variant="inverse" icon={LinkIcon} onClick={sendAsLink}>
+                          {t('quick.laterAction')}
+                        </Button>
+                      </div>
+                    ) : null
+                  }
+                />
+              ),
+            }
           : { key: 'creating', node: <StatusBlock busy title={t('quick.creating')} /> };
       case 'approval-required':
         return {

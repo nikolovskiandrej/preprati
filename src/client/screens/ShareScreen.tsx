@@ -83,13 +83,19 @@ export default function ShareScreen() {
     );
   }
 
-  return <ShareCreatorView limits={config.share} />;
+  return <ShareCreatorView limits={config.share} linkOrigin={config.linkOrigin ?? null} />;
 }
 
-function ShareCreatorView({ limits }: { limits: ShareLimits }) {
+function ShareCreatorView({
+  limits,
+  linkOrigin,
+}: {
+  limits: ShareLimits;
+  linkOrigin: string | null;
+}) {
   const { t, locale } = useI18n();
   const [creator, state] = useOwnedStore<CreatorState, ShareCreator>(() => {
-    const store = new ShareCreator(limits);
+    const store = new ShareCreator(limits, linkOrigin);
     // Files from a Quick Transfer that couldn't connect ("Send as a link instead").
     const handedOff = handedOffFiles();
     if (handedOff.length > 0) store.addFiles(handedOff);

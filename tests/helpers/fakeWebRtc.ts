@@ -361,6 +361,9 @@ export class LoopbackTransport implements SignalingTransport {
       case 'decline-peer':
         fail(sessions.declinePeer(this.peer));
         break;
+      case 'lock-session':
+        fail(sessions.lockSession(this.peer));
+        break;
       case 'signal':
         fail(sessions.relay(this.peer, parsed.payload));
         break;

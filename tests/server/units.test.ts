@@ -38,6 +38,22 @@ describe('config', () => {
     expect(loadConfig({ SHARE_ENABLED: 'false' }).share.unavailableReason).toBe('disabled');
   });
 
+  it('points links at the public origin, never at a login-protected deployment URL', () => {
+    // Vercel production: the project's domain (Vercel provides it), not the deployment's URL.
+    const vercel = { VERCEL_PROJECT_PRODUCTION_URL: 'preprati.vercel.app' };
+    expect(loadConfig({ ...vercel, VERCEL_ENV: 'production' }).linkOrigin).toBe(
+      'https://preprati.vercel.app',
+    );
+    // Previews keep their own URL; PUBLIC_ORIGIN wins wherever it is set.
+    expect(loadConfig({ ...vercel, VERCEL_ENV: 'preview' }).linkOrigin).toBeNull();
+    expect(
+      loadConfig({ ...vercel, VERCEL_ENV: 'production', PUBLIC_ORIGIN: 'https://preprati.example' })
+        .linkOrigin,
+    ).toBe('https://preprati.example');
+    // Elsewhere, links use whatever origin the page is on.
+    expect(loadConfig({}).linkOrigin).toBeNull();
+  });
+
   it('rejects invalid or unsafe settings with a clear error', () => {
     expect(() => loadConfig({ PORT: 'eighty' })).toThrow(ConfigError);
     expect(() => loadConfig({ STORAGE_DRIVER: 'ftp' })).toThrow(ConfigError);

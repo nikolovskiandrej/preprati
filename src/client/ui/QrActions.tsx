@@ -1,5 +1,10 @@
 /**
- * Copy QR Code · Share · Copy Link · Download QR Code.
+ * Copy QR Code · Share · Copy Link · Download QR Code. All four carry the same
+ * URL (the QR image encodes `image.url`, which callers set to `url`).
+ *
+ * Share sends the link itself, not the QR image: messaging apps such as
+ * Instagram keep an attached image and drop the text, and a QR picture can't
+ * be scanned by the phone it arrives on. The image has its own two actions.
  *
  * Feedback is always truthful: "QR copied" only appears after the PNG was
  * written to the clipboard. If image copying is unsupported or blocked, the
@@ -93,12 +98,15 @@ export function QrActions({
   fileName,
   shareTitle,
   shareText,
+  linkNote,
 }: {
   url: string;
   image: QrImageOptions;
   fileName: string;
   shareTitle: string;
   shareText: string;
+  /** Said once the link was copied or shared (e.g. that a live link needs this page open). */
+  linkNote?: string;
 }) {
   const { t } = useI18n();
   const { notify } = useToast();
@@ -158,24 +166,20 @@ export function QrActions({
 
   const onCopyLink = async () => {
     const result = await copyText(url);
-    if (result.ok) flashCopyLink();
-    else notify({ tone: 'error', message: t('qr.copyLinkFailed') });
+    if (!result.ok) {
+      notify({ tone: 'error', message: t('qr.copyLinkFailed') });
+      return;
+    }
+    flashCopyLink();
+    if (linkNote) notify({ tone: 'info', message: linkNote });
   };
 
   const onShare = async () => {
     if (typeof navigator.share === 'function') {
       try {
-        let data: ShareData = { title: shareTitle, text: shareText, url };
-        try {
-          const blob = await getPng();
-          const file = new File([blob], fileName, { type: 'image/png' });
-          if (navigator.canShare?.({ files: [file] })) {
-            data = { title: shareTitle, text: `${shareText}\n${url}`, files: [file] };
-          }
-        } catch {
-          // Share the link only.
-        }
-        await navigator.share(data);
+        // Called right in the click handler (the share sheet needs the user gesture).
+        await navigator.share({ title: shareTitle, text: shareText, url });
+        if (linkNote) notify({ tone: 'info', message: linkNote });
         return;
       } catch (error) {
         if ((error as { name?: string })?.name === 'AbortError') return; // the user closed the share sheet
@@ -184,7 +188,7 @@ export function QrActions({
       }
     }
     const result = await copyText(url);
-    if (result.ok) notify({ tone: 'info', message: t('qr.shareFallback') });
+    if (result.ok) notify({ tone: 'info', message: linkNote ?? t('qr.shareFallback') });
     else notify({ tone: 'error', message: t('qr.copyLinkFailed') });
   };
 
