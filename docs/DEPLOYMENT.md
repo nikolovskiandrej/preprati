@@ -88,7 +88,7 @@ Recommendations:
 
 ## TURN (optional)
 
-Without TURN, devices on restrictive networks (symmetric NAT, some mobile carriers, corporate firewalls, Wi-Fi networks that keep devices apart) cannot connect directly. The app explains why, offers "Try again" and lets the sender **Send through preprati.**: relay mode moves the files end-to-end encrypted through the share storage, so it needs Share Files to be enabled (any storage driver) and inherits its size limits and budget ([CONNECTIVITY.md §5](CONNECTIVITY.md#5-relay-mode-send-through-preprati)). A TURN relay is off by default because it costs bandwidth; [CONNECTIVITY.md §7](CONNECTIVITY.md#7-turn-relay-optional-off-by-default) compares the options, including coturn on hardware you already own. With [coturn](https://github.com/coturn/coturn):
+Without TURN, devices on restrictive networks (symmetric NAT, some mobile carriers, corporate firewalls, Wi-Fi networks that keep devices apart) cannot connect directly. The sending device then switches to relay mode on its own: it moves the files end-to-end encrypted through the share storage, so it needs Share Files to be enabled (any storage driver) and inherits its size limits and budget. Without it (or for larger files) the app makes one more direct attempt automatically, then explains the failure and offers "Try again" ([CONNECTIVITY.md §5](CONNECTIVITY.md#5-relay-mode-send-through-preprati)). A TURN relay is off by default because it costs bandwidth; [CONNECTIVITY.md §7](CONNECTIVITY.md#7-turn-relay-optional-off-by-default) compares the options, including coturn on hardware you already own. With [coturn](https://github.com/coturn/coturn):
 
 ```ini
 # /etc/turnserver.conf

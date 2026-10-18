@@ -1,15 +1,16 @@
 // @vitest-environment jsdom
 /**
- * What people see when two devices can't connect: a cause-specific
- * explanation, the actions that apply (relay mode first, where it works),
- * technical details on request, and the hand-off of the selected files to
- * Share Files.
+ * What people see when two devices can't connect: while the app recovers on
+ * its own, a status that says so (and asks for nothing); after that, a
+ * cause-specific explanation, the actions that apply (relay mode first, where
+ * it works), technical details on request, and the hand-off of the selected
+ * files to Share Files.
  */
-import { screen } from '@testing-library/react';
+import { act, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { describeQuickError } from '../../src/client/features/quick/errors';
-import { QuickError, RelayNote } from '../../src/client/features/quick/panels';
+import { ConnectingStatus, QuickError, RelayNote } from '../../src/client/features/quick/panels';
 import { handOffFiles, handedOffFiles } from '../../src/client/lib/handoff';
 import ShareScreen from '../../src/client/screens/ShareScreen';
 import type { ConnectionDiagnostics, FailureCause } from '../../src/client/transfer/diagnostics';
@@ -40,6 +41,7 @@ function failedState(cause: FailureCause, overrides: Partial<QuickState> = {}): 
     peer: { label: 'Android · Chrome', via: 'link' },
     route: null,
     reconnecting: false,
+    recovering: false,
     pendingFiles: [],
     transfer: null,
     rate: null,
@@ -89,7 +91,7 @@ describe('a failed connection', () => {
     ttlSeconds: 86_400,
   };
 
-  it('offers relay mode to the sender, and tells the receiver where to choose it', () => {
+  it('offers relay mode to the sender, and no relay instructions to the receiver', () => {
     const sender = describeQuickError(
       failedState('same-network-blocked', { relay, canRelay: true }),
       { shareAvailable: true },
@@ -97,15 +99,15 @@ describe('a failed connection', () => {
     expect(sender.connection).toMatchObject({ canRetry: true, canRelay: true });
     expect(sender.hint).toBeUndefined(); // the button says it
 
+    // The sending device switches to relay mode by itself when it can; a failure that still
+    // reaches the receiver is one that relay mode couldn't fix, so it isn't suggested there.
     const receiver = describeQuickError(
       failedState('same-network-blocked', { role: 'receiver', isHost: false, relay }),
       { shareAvailable: true },
     )!;
-    expect(receiver.hint).toBe('errors.connectionRelayReceiver');
+    expect(receiver.hint).toBe('errors.connectionLinkReceiver');
     renderWithProviders(<QuickError view={receiver} device="Android · Chrome" actions={null} />);
-    expect(
-      screen.getByText(/Or, on Android · Chrome, choose “Send through preprati.”/),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/choose “Send through preprati.”/)).not.toBeInTheDocument();
   });
 
   it('explains what relay mode does with the files, and its size limit', () => {
@@ -160,5 +162,31 @@ describe('a failed connection', () => {
     expect(screen.getByText('report')).toBeInTheDocument(); // the name, shown without extension
     expect(screen.getByText(/1 file selected/)).toBeInTheDocument();
     expect(handedOffFiles()).toEqual([]); // used once
+  });
+
+  it('says the app is trying another way, with nothing to press, while it recovers', () => {
+    const action = <button type="button">Send through preprati. instead</button>;
+    const { unmount } = renderWithProviders(
+      <ConnectingStatus device="Android · Chrome" recovering slowAction={action} />,
+    );
+    expect(screen.getByText('Connecting to Android · Chrome…')).toBeInTheDocument();
+    expect(screen.getByText(/trying another way\. You don’t need to do anything/)).toBeVisible();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    unmount();
+    renderWithProviders(<ConnectingStatus device="Android · Chrome" recovering viaServer />);
+    expect(screen.getByText('Connecting to Android · Chrome through preprati.…')).toBeVisible();
+    expect(screen.getByText(/A direct connection wasn’t possible/)).toBeVisible();
+  });
+
+  it('tells a slow connection that it will switch by itself when it can', () => {
+    vi.useFakeTimers();
+    try {
+      renderWithProviders(<ConnectingStatus device="Android · Chrome" autoFallback />);
+      expect(screen.getByText('Setting up a direct, encrypted connection.')).toBeVisible();
+      act(() => void vi.advanceTimersByTime(9_000));
+      expect(screen.getByText(/switches to another way on its own/)).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

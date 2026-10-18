@@ -203,15 +203,21 @@ export function ApprovalPrompt({
 /**
  * "Connecting…", turning into a patience note when it takes a while (other
  * networks, retries) — and offering `slowAction` then, if given. `viaServer`:
- * relay mode is being set up instead of a direct connection.
+ * relay mode is being set up instead of a direct connection. `recovering`: a
+ * direct attempt failed and the app is connecting another way on its own.
+ * `autoFallback`: if the direct attempt fails, that will happen by itself.
  */
 export function ConnectingStatus({
   device,
   viaServer = false,
+  recovering = false,
+  autoFallback = false,
   slowAction,
 }: {
   device: string;
   viaServer?: boolean;
+  recovering?: boolean;
+  autoFallback?: boolean;
   slowAction?: ReactNode;
 }) {
   const { t } = useI18n();
@@ -223,16 +229,23 @@ export function ConnectingStatus({
       <StatusBlock
         busy
         title={t('quick.connectingServer', { device })}
-        detail={t('quick.connectingServerHint')}
+        detail={
+          recovering ? t('quick.connectingServerRecovering') : t('quick.connectingServerHint')
+        }
       />
     );
+  const detail = recovering
+    ? t('quick.connectingRecovering')
+    : !slow
+      ? t('quick.connectingHint')
+      : autoFallback
+        ? t('quick.connectingSlowAuto')
+        : t('quick.connectingSlow');
   return (
-    <StatusBlock
-      busy
-      title={t('quick.connecting', { device })}
-      detail={slow ? t('quick.connectingSlow') : t('quick.connectingHint')}
-    >
-      {slow && slowAction ? <div className={styles.buttons}>{slowAction}</div> : null}
+    <StatusBlock busy title={t('quick.connecting', { device })} detail={detail}>
+      {slow && !recovering && slowAction ? (
+        <div className={styles.buttons}>{slowAction}</div>
+      ) : null}
     </StatusBlock>
   );
 }

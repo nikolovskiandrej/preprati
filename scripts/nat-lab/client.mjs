@@ -4,11 +4,14 @@
 //
 //   node client.mjs <host|guest> <app url> <tag> [timeout s] [payload MB] [retry|relay]
 //
-// With "retry": after a failed connection, wait for <dir>/go-retry-<tag>, then
-// the guest presses "Try again". With "relay": after a failed connection, the
-// guest sends the file through preprati. instead and the host accepts it.
-// Files are exchanged through <dir> (LAB_DIR, default /tmp: the lab's shared
-// results directory inside the container).
+// Nobody presses anything to get connected: when a direct attempt fails, the
+// app recovers on its own (relay mode, or one more attempt), and the devices
+// record whether an error was ever shown on the way. With "retry": after the
+// failure is finally shown, wait for <dir>/go-retry-<tag>, then the guest
+// presses "Try again". Each device writes <dir>/recovering-<tag>-<role> when
+// it first says it is trying another way. Files are exchanged through <dir>
+// (LAB_DIR, default /tmp: the lab's shared results directory inside the
+// container).
 /* global window -- the init script and evaluate callbacks run in the page */
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -65,8 +68,11 @@ await context.addInitScript(() => {
 });
 const page = await context.newPage();
 
-const connected = page.getByText(/Direct connection|Relayed connection/).first();
+const connected = page.getByText(/Direct connection|Relayed connection|Through preprati\./).first();
 const failure = page.getByText(/Couldn’t connect the devices|Disconnected/).first();
+const recovering = page
+  .getByText(/preprati\. is trying another way|A direct connection wasn’t possible/)
+  .first();
 
 async function describeFailure() {
   const text = await page
@@ -95,6 +101,8 @@ const connectOrFail = () =>
   ]).catch(() => 'timed out');
 
 let sawReconnecting = false;
+let sawRecovering = false;
+let sawFailure = false;
 const watcher = setInterval(async () => {
   const visible = await page
     .getByText('Connection interrupted. Reconnecting…')
@@ -102,6 +110,15 @@ const watcher = setInterval(async () => {
     .catch(() => false);
   if (visible && !sawReconnecting) mark('showed "Connection interrupted. Reconnecting…"');
   sawReconnecting ||= visible;
+  if (!sawRecovering && (await recovering.isVisible().catch(() => false))) {
+    sawRecovering = true;
+    mark(`said "${(await recovering.textContent().catch(() => '')).slice(0, 60)}…"`);
+    writeFileSync(`${dir}/recovering-${tag}-${role}`, '');
+  }
+  if (!sawFailure && (await failure.isVisible().catch(() => false))) {
+    sawFailure = true;
+    mark('showed an error');
+  }
 }, 250);
 
 async function connect() {
@@ -113,6 +130,7 @@ async function connect() {
     await waitForFile(`${dir}/go-retry-${tag}`, 120_000);
     if (role === 'guest') {
       await page.getByRole('button', { name: 'Try again' }).click();
+      result.pressed = (result.pressed ?? 0) + 1;
       mark('pressed "Try again"');
     }
     // The new attempt replaces the failure view (the host's once the guest's request arrives).
@@ -147,38 +165,30 @@ function payload() {
 
 try {
   const codeFile = `${dir}/code-${tag}`;
-  const relay = mode === 'relay';
   if (role === 'host') {
     await page.goto(`${base}/receive`);
     const code = page.getByTestId('pairing-code');
     await code.waitFor({ timeout: 20_000 });
     writeFileSync(codeFile, (await code.textContent()).replace('-', '').trim());
     result.outcome = await connect();
-    if (relay && result.outcome.startsWith('failed')) {
-      result.said.push(result.outcome);
-      result.outcome = await receive('through preprati.');
-    } else if (result.outcome.startsWith('connected')) {
-      const route = result.outcome.replace(/^connected \((.*)\)$/, '$1').toLowerCase();
-      result.outcome = await receive(`over a ${route}`);
+    if (result.outcome.startsWith('connected')) {
+      const route = result.outcome.replace(/^connected \((.*)\)$/, '$1');
+      result.outcome = await receive(
+        route === 'Through preprati.' ? 'through preprati.' : `over a ${route.toLowerCase()}`,
+      );
     }
   } else {
     await waitForFile(codeFile, 60_000);
     await page.goto(`${base}/j/${readFileSync(codeFile, 'utf8').trim()}`);
     result.outcome = await connect();
-    if (relay && result.outcome.startsWith('failed')) {
-      result.said.push(result.outcome);
-      await page.locator('input[type=file]').setInputFiles(payload());
-      await page.getByRole('button', { name: 'Send through preprati.' }).click();
-      mark('pressed "Send through preprati."');
-      await page.getByText(/Sent! 1 file delivered to/).waitFor({ timeout: 180_000 });
-      result.outcome = `sent ${payloadMb} MB through preprati.`;
-      mark('file sent');
-    } else if (result.outcome.startsWith('connected')) {
+    if (result.outcome.startsWith('connected')) {
       await page.locator('input[type=file]').setInputFiles(payload());
       await page.getByRole('button', { name: 'Send 1 file' }).click();
       writeFileSync(`${dir}/sending-${tag}`, '');
       await page.getByText(/Sent! 1 file delivered to/).waitFor({ timeout: 180_000 });
-      result.outcome = `sent ${payloadMb} MB`;
+      result.outcome = result.outcome.includes('Through preprati.')
+        ? `sent ${payloadMb} MB through preprati.`
+        : `sent ${payloadMb} MB`;
       mark('file sent');
     }
   }
@@ -189,6 +199,8 @@ try {
 }
 clearInterval(watcher);
 result.reconnecting = sawReconnecting;
+result.recovering = sawRecovering;
+result.showedError = sawFailure;
 result.ice = await page.evaluate(() => window.__iceLogs).catch(() => []);
 writeFileSync(`${dir}/result-${tag}-${role}.json`, JSON.stringify(result, null, 2));
 await browser.close();

@@ -35,6 +35,7 @@ import type {
   TransferRole,
 } from '../../shared/signaling';
 import type { KvStore } from '../kv';
+import { recoveryStep, sessionTag, type SignalingLog } from './events';
 import { randomCode } from './sessionManager';
 
 interface ConnRecord {
@@ -70,6 +71,8 @@ export interface PollingSignalingOptions {
   joinFailuresPer10Min: number;
   iceServers: (sessionId: string) => IceServerConfig[];
   now?: () => number;
+  /** Lifecycle events for the server log (see ./events.ts). */
+  log?: SignalingLog;
 }
 
 const APPROVAL_WINDOW_MS = 2 * 60_000;
@@ -98,9 +101,22 @@ export interface InboxBatch {
   firstSeq: number;
 }
 
+/** One message of a client's batch, with its per-connection number (if the client sent one). */
+export interface NumberedMessage {
+  seq: number | null;
+  message: ClientMessage;
+}
+
+/** Where a session member's signals go, looked up once per batch. */
+interface RelayTarget {
+  sessionId: string;
+  target: string;
+}
+
 export class PollingSignaling {
   private readonly now: () => number;
   private readonly presenceTtlMs: number;
+  private readonly log: SignalingLog;
 
   constructor(
     private readonly kv: KvStore,
@@ -108,6 +124,7 @@ export class PollingSignaling {
   ) {
     this.now = options.now ?? Date.now;
     this.presenceTtlMs = options.presenceTtlMs ?? 150_000;
+    this.log = options.log ?? (() => undefined);
   }
 
   /** Registers a new client connection and returns its credentials. */
@@ -151,24 +168,63 @@ export class PollingSignaling {
     });
   }
 
-  /** Handles one client message; replies are queued in the relevant inboxes. */
-  async handle(conn: ConnRecord, message: ClientMessage): Promise<void> {
+  /**
+   * Handles one client message; replies are queued in the relevant inboxes.
+   * Returns the connection as it is afterwards (creating, joining or leaving
+   * a session changes its membership).
+   */
+  async handle(conn: ConnRecord, message: ClientMessage): Promise<ConnRecord> {
     switch (message.type) {
       case 'ping':
-        return this.send(conn.id, { type: 'pong' });
+        await this.send(conn.id, { type: 'pong' });
+        return conn;
       case 'create-session':
         return this.createSession(conn, message.role, message.device);
       case 'join-session':
         return this.joinSession(conn, message.target, message.device);
       case 'approve-peer':
-        return this.approve(conn);
+        await this.approve(conn);
+        return conn;
       case 'decline-peer':
-        return this.decline(conn);
+        await this.decline(conn);
+        return conn;
       case 'signal':
-        return this.relay(conn, message.payload);
+        await this.relay(conn, message.payload);
+        return conn;
       case 'leave-session':
-        return this.leave(conn);
+        await this.leave(conn);
+        return { ...conn, sessionId: null, role: null };
     }
+  }
+
+  /**
+   * Handles a client's messages in order, each once: a message whose number
+   * was already handled (a retried request) is skipped. Consecutive signals
+   * share one lookup of where they go, so a batch of ICE candidates costs
+   * little more than one.
+   */
+  async handleBatch(conn: ConnRecord, batch: NumberedMessage[]): Promise<void> {
+    let current = conn;
+    let target: RelayTarget | null = null;
+    for (const { seq, message } of batch) {
+      if (seq !== null && !(await this.claimSequence(current.id, seq))) continue;
+      if (message.type !== 'signal') {
+        target = null;
+        current = await this.handle(current, message);
+        continue;
+      }
+      if (!target || target.sessionId !== current.sessionId) {
+        target = await this.relayTarget(current);
+        if (!target) continue; // the error is queued for the client
+      }
+      this.logRecovery(target.sessionId, message.payload);
+      await this.send(target.target, { type: 'signal', payload: message.payload });
+    }
+  }
+
+  private logRecovery(sessionId: string, payload: SignalPayload): void {
+    const step = recoveryStep(payload);
+    if (step) this.log('recovery', { session: sessionTag(sessionId), ...step });
   }
 
   /** Lazily applies expiry/departure rules, then reads the inbox (see `read`). */
@@ -209,10 +265,10 @@ export class PollingSignaling {
     conn: ConnRecord,
     role: TransferRole,
     device: DeviceInfo,
-  ): Promise<void> {
-    if (conn.sessionId) return this.error(conn, 'already-in-session');
+  ): Promise<ConnRecord> {
+    if (conn.sessionId) return this.fail(conn, 'already-in-session');
     const created = await this.kv.incrBy(K.createdBy(conn.ip), 1, WINDOW_10_MIN);
-    if (created > this.options.maxSessionsPerIpPer10Min) return this.error(conn, 'rate-limited');
+    if (created > this.options.maxSessionsPerIpPer10Min) return this.fail(conn, 'rate-limited');
 
     const now = this.now();
     const id = randomId();
@@ -225,7 +281,7 @@ export class PollingSignaling {
       });
       if (claimed) code = candidate;
     }
-    if (!code) return this.error(conn, 'server-busy');
+    if (!code) return this.fail(conn, 'server-busy');
 
     const session: SessionRecord = {
       id,
@@ -237,7 +293,9 @@ export class PollingSignaling {
       pairingExpiresAt: now + this.options.pairingTtlMs,
     };
     await this.kv.setJson(K.session(id), session, { ttlMs: this.options.maxLifetimeMs });
-    await this.saveConn({ ...conn, sessionId: id, role: 'host' });
+    const joined: ConnRecord = { ...conn, sessionId: id, role: 'host' };
+    await this.saveConn(joined);
+    this.log('session-created', { session: sessionTag(id), role, transport: 'http' });
     await this.send(conn.id, {
       type: 'session-created',
       sessionId: id,
@@ -246,27 +304,34 @@ export class PollingSignaling {
       expiresAt: session.pairingExpiresAt,
       iceServers: this.options.iceServers(id),
     });
+    return joined;
   }
 
   private async joinSession(
     conn: ConnRecord,
     target: JoinTarget,
     device: DeviceInfo,
-  ): Promise<void> {
-    if (conn.sessionId) return this.error(conn, 'already-in-session');
+  ): Promise<ConnRecord> {
+    if (conn.sessionId) return this.fail(conn, 'already-in-session');
     const failures = (await this.kv.getJson<number>(K.joinFailures(conn.ip))) ?? 0;
-    if (failures >= this.options.joinFailuresPer10Min)
-      return this.send(conn.id, { type: 'error', code: 'rate-limited', retryAfterMs: 60_000 });
+    if (failures >= this.options.joinFailuresPer10Min) {
+      await this.send(conn.id, { type: 'error', code: 'rate-limited', retryAfterMs: 60_000 });
+      return conn;
+    }
 
     const sessionId =
       target.via === 'link' ? target.sessionId : await this.kv.getJson<string>(K.code(target.code));
     const session = sessionId ? await this.kv.getJson<SessionRecord>(K.session(sessionId)) : null;
-    if (!session) return this.joinFailed(conn, 'session-not-found');
+    if (!session) {
+      await this.joinFailed(conn, 'session-not-found');
+      return conn;
+    }
 
     const existingGuest = await this.kv.getJson<GuestRecord>(K.guest(session.id));
     if (!existingGuest && this.now() >= session.pairingExpiresAt) {
       await this.expire(session);
-      return this.joinFailed(conn, 'session-expired');
+      await this.joinFailed(conn, 'session-expired');
+      return conn;
     }
     const needsApproval = target.via === 'code' && session.hostRole === 'sender';
     const claimed = await this.kv.setJson(
@@ -274,7 +339,10 @@ export class PollingSignaling {
       { conn: conn.id, device, via: target.via } satisfies GuestRecord,
       { ifNotExists: true, ttlMs: this.options.maxLifetimeMs },
     );
-    if (!claimed) return this.error(conn, 'session-full');
+    if (!claimed) {
+      this.log('join-failed', { session: sessionTag(session.id), reason: 'session-full' });
+      return this.fail(conn, 'session-full');
+    }
 
     if (!needsApproval) {
       await this.kv.setJson(K.approved(session.id), true, { ttlMs: this.options.maxLifetimeMs });
@@ -288,7 +356,13 @@ export class PollingSignaling {
         );
       }
     }
-    await this.saveConn({ ...conn, sessionId: session.id, role: 'guest' });
+    const joined: ConnRecord = { ...conn, sessionId: session.id, role: 'guest' };
+    await this.saveConn(joined);
+    this.log('device-joined', {
+      session: sessionTag(session.id),
+      via: target.via,
+      approval: needsApproval,
+    });
     await this.send(conn.id, {
       type: 'session-joined',
       sessionId: session.id,
@@ -303,6 +377,7 @@ export class PollingSignaling {
       via: target.via,
       needsApproval,
     });
+    return joined;
   }
 
   private async approve(conn: ConnRecord): Promise<void> {
@@ -312,6 +387,7 @@ export class PollingSignaling {
     if (!guest || (await this.kv.exists(K.approved(session.id))))
       return this.error(conn, 'not-allowed');
     await this.kv.setJson(K.approved(session.id), true, { ttlMs: this.options.maxLifetimeMs });
+    this.log('peer-approved', { session: sessionTag(session.id) });
     await this.send(guest.conn, { type: 'peer-approved' });
   }
 
@@ -322,19 +398,43 @@ export class PollingSignaling {
     if (!guest || (await this.kv.exists(K.approved(session.id))))
       return this.error(conn, 'not-allowed');
     await this.removeGuest(session, guest);
+    this.log('peer-declined', { session: sessionTag(session.id) });
     await this.send(guest.conn, { type: 'peer-declined' });
     if (this.now() >= session.pairingExpiresAt) await this.expire(session);
   }
 
   private async relay(conn: ConnRecord, payload: SignalPayload): Promise<void> {
-    if (!conn.sessionId) return this.error(conn, 'not-in-session');
-    const session = await this.kv.getJson<SessionRecord>(K.session(conn.sessionId));
-    if (!session) return this.error(conn, 'not-in-session');
-    const guest = await this.kv.getJson<GuestRecord>(K.guest(session.id));
-    if (!guest || !(await this.kv.exists(K.approved(session.id))))
-      return this.error(conn, 'not-allowed');
-    const target = conn.id === session.hostConn ? guest.conn : session.hostConn;
-    await this.send(target, { type: 'signal', payload });
+    const target = await this.relayTarget(conn);
+    if (!target) return;
+    this.logRecovery(target.sessionId, payload);
+    await this.send(target.target, { type: 'signal', payload });
+  }
+
+  /** The other member of a paired session, or null (with an error queued for the client). */
+  private async relayTarget(conn: ConnRecord): Promise<RelayTarget | null> {
+    if (!conn.sessionId) {
+      await this.error(conn, 'not-in-session');
+      return null;
+    }
+    const [session, guest, approved] = (await this.kv.getMany([
+      K.session(conn.sessionId),
+      K.guest(conn.sessionId),
+      K.approved(conn.sessionId),
+    ])) as [SessionRecord | null, GuestRecord | null, true | null];
+    if (!session) {
+      await this.error(conn, 'not-in-session');
+      return null;
+    }
+    // Only the two members of a paired session exchange signals.
+    const member = conn.id === session.hostConn || conn.id === guest?.conn;
+    if (!guest || !approved || !member) {
+      await this.error(conn, 'not-allowed');
+      return null;
+    }
+    return {
+      sessionId: session.id,
+      target: conn.id === session.hostConn ? guest.conn : session.hostConn,
+    };
   }
 
   private async leave(conn: ConnRecord): Promise<void> {
@@ -344,6 +444,8 @@ export class PollingSignaling {
     if (!session) return;
     const guest = await this.kv.getJson<GuestRecord>(K.guest(session.id));
     const approved = await this.kv.exists(K.approved(session.id));
+    const by = conn.id === session.hostConn ? 'host' : 'guest';
+    this.log('peer-left', { session: sessionTag(session.id), reason: 'left', by });
     if (conn.id !== session.hostConn && !approved && guest?.conn === conn.id) {
       // A guest awaiting approval walked away: the next device may join.
       await this.kv.del(K.guest(session.id));
@@ -376,6 +478,7 @@ export class PollingSignaling {
     if (conn.id === session.hostConn) {
       if (!guest) return;
       if (!(await this.kv.exists(K.conn(guest.conn)))) {
+        this.log('peer-left', { session: sessionTag(id), reason: 'gone', by: 'guest' });
         if (approved) {
           await this.send(conn.id, { type: 'peer-left', reason: 'gone' });
           await this.destroy(session, guest);
@@ -387,6 +490,7 @@ export class PollingSignaling {
       return;
     }
     if (!(await this.kv.exists(K.conn(session.hostConn)))) {
+      this.log('peer-left', { session: sessionTag(id), reason: 'gone', by: 'host' });
       await this.send(conn.id, { type: 'peer-left', reason: 'gone' });
       await this.destroy(session, guest);
     }
@@ -418,6 +522,7 @@ export class PollingSignaling {
   }
 
   private async expire(session: SessionRecord): Promise<void> {
+    this.log('session-expired', { session: sessionTag(session.id) });
     const guest = await this.kv.getJson<GuestRecord>(K.guest(session.id));
     await this.send(session.hostConn, { type: 'session-expired' });
     if (guest) await this.send(guest.conn, { type: 'session-expired' });
@@ -443,6 +548,7 @@ export class PollingSignaling {
     conn: ConnRecord,
     code: 'session-not-found' | 'session-expired',
   ): Promise<void> {
+    this.log('join-failed', { reason: code });
     await this.kv.incrBy(K.joinFailures(conn.ip), 1, WINDOW_10_MIN);
     await this.error(conn, code);
   }
@@ -457,6 +563,12 @@ export class PollingSignaling {
 
   private error(conn: ConnRecord, code: SignalingErrorCode): Promise<void> {
     return this.send(conn.id, { type: 'error', code });
+  }
+
+  /** Queues an error and leaves the connection as it was. */
+  private async fail(conn: ConnRecord, code: SignalingErrorCode): Promise<ConnRecord> {
+    await this.error(conn, code);
+    return conn;
   }
 }
 

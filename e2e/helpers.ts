@@ -111,6 +111,11 @@ export async function blockFirstConnection(context: BrowserContext): Promise<voi
   await blockConnections(context, 1);
 }
 
+/** Makes the first `count` WebRTC connection attempts in this browser context impossible. */
+export async function blockFirstConnections(context: BrowserContext, count: number) {
+  await blockConnections(context, count);
+}
+
 /**
  * Makes every WebRTC connection attempt in this browser context impossible,
  * like a Wi-Fi network that keeps its devices apart.
@@ -137,6 +142,33 @@ async function blockConnections(context: BrowserContext, count: number): Promise
       }
     };
   }, count);
+}
+
+/**
+ * Records whether a connection failure was ever on screen in this context
+ * (read with `errorsShown`), so a test can check that recovery happened
+ * without the user being shown an error on the way.
+ */
+export async function recordErrors(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const record = window as unknown as { __errorsShown: string[] };
+    record.__errorsShown = [];
+    const check = () => {
+      const text = document.body?.innerText ?? '';
+      for (const title of ['Couldn’t connect the devices', 'Disconnected'])
+        if (text.includes(title) && !record.__errorsShown.includes(title))
+          record.__errorsShown.push(title);
+    };
+    new MutationObserver(check).observe(document, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  });
+}
+
+export function errorsShown(page: Page): Promise<string[]> {
+  return page.evaluate(() => (window as unknown as { __errorsShown: string[] }).__errorsShown);
 }
 
 /** Files of encrypted share packages still stored under `dir` (deletion tombstones aside). */

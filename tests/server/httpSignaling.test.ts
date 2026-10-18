@@ -115,6 +115,85 @@ describe('HTTP signaling routes', () => {
     ).toEqual([{ type: 'error', code: 'already-in-session' }]);
   });
 
+  it('handles a batch in order, and each message once when a retry overlaps it', async () => {
+    const host = await connect();
+    const guest = await connect();
+    const [created] = await send(
+      host,
+      { type: 'create-session', role: 'receiver', device: { label: 'Laptop' } },
+      1,
+    );
+    const sessionId = (created as Extract<ServerMessage, { type: 'session-created' }>).sessionId;
+    const candidate = (port: number) => ({
+      type: 'signal',
+      payload: {
+        kind: 'candidate',
+        candidate: { candidate: `candidate:1 1 udp 1 192.0.2.1 ${port} typ host`, sdpMid: '0' },
+      },
+    });
+    // Joining and the first signals in one request: the join counts for the signals after it.
+    const joined = await send(
+      guest,
+      [
+        { type: 'join-session', target: { via: 'link', sessionId }, device: { label: 'Phone' } },
+        candidate(5000),
+        candidate(5001),
+      ],
+      1,
+    );
+    expect(joined.map((m) => m.type)).toEqual(['session-joined']);
+    // The response to that was "lost": the retry carries the same messages plus a new one.
+    await send(
+      guest,
+      [
+        { type: 'join-session', target: { via: 'link', sessionId }, device: { label: 'Phone' } },
+        candidate(5000),
+        candidate(5001),
+        candidate(5002),
+      ],
+      1,
+    );
+    const relayed = (await poll(host)).filter((m) => m.type === 'signal');
+    expect(
+      relayed.map((m) =>
+        m.type === 'signal' && m.payload.kind === 'candidate'
+          ? m.payload.candidate?.candidate.split(' ')[5]
+          : null,
+      ),
+    ).toEqual(['5000', '5001', '5002']);
+  });
+
+  it('refuses an oversized batch whole, and reports invalid items in one', async () => {
+    const c = await connect();
+    const pings = Array.from({ length: 33 }, () => ({ type: 'ping' }));
+    expect(await send(c, pings, 1)).toEqual([{ type: 'error', code: 'invalid-message' }]);
+    expect(await send(c, [{ type: 'ping' }, { type: 'bogus' }], 40)).toEqual([
+      { type: 'error', code: 'invalid-message' },
+      { type: 'pong' },
+    ]);
+  });
+
+  it('relays signals only between the two members of a paired session', async () => {
+    const host = await connect();
+    const guest = await connect();
+    const [created] = await send(
+      host,
+      { type: 'create-session', role: 'sender', device: { label: 'Laptop' } },
+      1,
+    );
+    const code = (created as Extract<ServerMessage, { type: 'session-created' }>).code;
+    // A code join to a sending host waits for approval: no signals until then.
+    await send(
+      guest,
+      { type: 'join-session', target: { via: 'code', code }, device: { label: 'Phone' } },
+      1,
+    );
+    expect(
+      await send(guest, { type: 'signal', payload: { kind: 'retry', attempt: 1 } }, 2),
+    ).toEqual([{ type: 'error', code: 'not-allowed' }]);
+    expect((await poll(host)).map((m) => m.type)).toEqual(['peer-joined']);
+  });
+
   it('rejects requests without valid credentials', async () => {
     const real = await connect();
     const attempts: RequestInit[] = [

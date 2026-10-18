@@ -74,6 +74,18 @@ export const SignalPayloadSchema = z.discriminatedUnion('kind', [
   /** The answering device asks the offering device (the host) to start attempt `attempt`. */
   z.object({ kind: z.literal('retry'), attempt: AttemptSchema }),
   /**
+   * The receiving device's attempt `attempt` failed (it closed that peer
+   * connection) and it now waits for the sending device's next step, which a
+   * sender still trying that attempt can take at once.
+   */
+  z.object({ kind: z.literal('attempt-failed'), attempt: AttemptSchema }),
+  /**
+   * The sending device found nothing more to try on its own after attempt
+   * `attempt` failed (no relay mode, no automatic attempt left) and shows the
+   * failure; the receiving device stops waiting for its next step.
+   */
+  z.object({ kind: z.literal('gave-up'), attempt: AttemptSchema }),
+  /**
    * Relay mode: the sending device proposes it with its half of an ECDH key
    * agreement; the receiving device answers with its own half, naming the
    * proposal it answers (`reply`: the sender's key).

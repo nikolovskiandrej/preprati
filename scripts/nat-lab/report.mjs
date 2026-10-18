@@ -22,6 +22,9 @@ for (const [label, result] of [
   for (const said of result.said) console.log(`      app said: ${said.replace(/^failed: /, '')}`);
   if (result.details) console.log(`      details:  ${result.details.join(' | ')}`);
   if (result.reconnecting) console.log('      showed "Connection interrupted. Reconnecting…"');
+  console.log(
+    `      recovered on its own: ${result.recovering ? 'yes' : 'no'} · error shown: ${result.showedError ? 'yes' : 'no'} · buttons pressed to connect: ${result.pressed ?? 0}`,
+  );
   console.log(`      timeline: ${result.events.join(' → ')}`);
   if (flag === '--ice')
     result.ice.forEach((log, index) =>

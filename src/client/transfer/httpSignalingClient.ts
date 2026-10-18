@@ -4,7 +4,10 @@
  * transport (see src/shared/signaling.ts).
  *
  * - Outgoing messages are POSTed strictly in order (an offer must arrive
- *   before its ICE candidates); each response carries any queued replies.
+ *   before its ICE candidates). Whatever queued up while a request was in
+ *   flight goes out together in the next one, so a burst of ICE candidates
+ *   costs one or two round trips instead of one each. Each response carries
+ *   any queued replies.
  * - Incoming messages are numbered by the server and stay queued until a
  *   later request acknowledges them (`X-Signal-Ack`). A response lost on a
  *   flaky network is therefore delivered again, and duplicates from
@@ -17,7 +20,10 @@
  * - A page that comes back to the foreground checks right away: phones pause
  *   timers in the background.
  * - Closing the page sends a `sendBeacon` disconnect so the other device
- *   learns right away; otherwise the server notices after a few minutes.
+ *   learns right away; otherwise the server notices after a few minutes. A
+ *   page kept in the back/forward cache is disconnected the same way and
+ *   reports the closed channel, so it never comes back showing a session the
+ *   server has already ended.
  */
 import {
   ServerMessageSchema,
@@ -36,6 +42,9 @@ const PACE_INTERVAL_MS: Record<SignalingPace, number> = {
   quiet: 15_000,
 };
 const MAX_CONSECUTIVE_FAILURES = 8;
+/** Most messages per request (the server's limit) and their combined size. */
+const MAX_BATCH_MESSAGES = 32;
+const MAX_BATCH_CHARS = 56 * 1024;
 
 interface Credentials {
   connectionId: string;
@@ -143,17 +152,34 @@ export class HttpSignalingClient implements SignalingTransport {
     this.sending = true;
     try {
       while (this.outbox.length > 0 && this.isOpen) {
-        const { seq, message } = this.outbox[0]!;
-        const batch = await this.request('POST', '/api/signal/send', message, {
-          'X-Signal-Seq': String(seq),
-        });
-        if (batch === null) return; // failure handling scheduled a retry or closed
-        this.outbox.shift();
-        this.deliver(batch);
+        const count = this.batchSize();
+        const messages = this.outbox.slice(0, count).map((entry) => entry.message);
+        // A retried request keeps its numbers, so the server skips what it already handled.
+        const replies = await this.request(
+          'POST',
+          '/api/signal/send',
+          count === 1 ? messages[0] : messages,
+          { 'X-Signal-Seq': String(this.outbox[0]!.seq) },
+        );
+        if (replies === null) return; // failure handling scheduled a retry or closed
+        this.outbox.splice(0, count);
+        this.deliver(replies);
       }
     } finally {
       this.sending = false;
     }
+  }
+
+  /** How many queued messages fit into the next request (always at least one). */
+  private batchSize(): number {
+    let chars = 0;
+    let count = 0;
+    for (const { message } of this.outbox) {
+      chars += JSON.stringify(message).length + 1;
+      if (count > 0 && (chars > MAX_BATCH_CHARS || count >= MAX_BATCH_MESSAGES)) break;
+      count += 1;
+    }
+    return count;
   }
 
   private schedulePoll(delay: number): void {
@@ -243,7 +269,10 @@ export class HttpSignalingClient implements SignalingTransport {
     });
   }
 
-  private readonly handlePageHide = () => this.beaconDisconnect();
+  private readonly handlePageHide = (event: PageTransitionEvent) => {
+    this.beaconDisconnect();
+    if (event.persisted) this.finish('closed');
+  };
 
   /** Back in the foreground: whatever arrived while timers were paused is fetched at once. */
   private readonly handleVisibility = () => {

@@ -11,16 +11,20 @@
  * Terminal/side phases: rejected, cancelled (connection stays up; another
  * transfer can follow), expired, disconnected, failed.
  *
- * A failed connection attempt can be retried within the same session
- * ("Try again", up to MAX_CONNECTION_ATTEMPTS): both devices stay paired and
- * renegotiate from scratch as attempt n+1. Signals carry their attempt, so
- * late messages from an abandoned attempt are dropped. Once the data channel
- * is open, the connection no longer depends on signaling: drops are repaired
- * with ICE restarts (see PeerLink) and the other device's departure is
- * reported by the channel itself.
+ * When a direct attempt fails, the session recovers on its own (`recovering`
+ * while it does), so nobody has to press a button to get connected: the
+ * sender switches to relay mode when the server and the chosen files allow
+ * it, or otherwise starts one more direct attempt; the receiver waits for the
+ * sender's next step. Only when that doesn't work either does the failure
+ * show, with "Try again" (up to MAX_CONNECTION_ATTEMPTS per session): both
+ * devices stay paired and renegotiate from scratch as attempt n+1. Signals
+ * carry their attempt, so late messages from an abandoned attempt are
+ * dropped. Once the data channel is open, the connection no longer depends
+ * on signaling: drops are repaired with ICE restarts (see PeerLink) and the
+ * other device's departure is reported by the channel itself.
  *
- * When the devices can't connect directly, the sender can switch the session
- * to relay mode ("Send through preprati."): the files travel as a temporary,
+ * Relay mode ("Send through preprati.", automatic as above or the sender's
+ * choice while a direct attempt drags on): the files travel as a temporary,
  * end-to-end encrypted share package instead (see ./relay.ts), and the rest
  * of the session — offer, accept, progress, received files — stays the same.
  *
@@ -57,7 +61,7 @@ import {
 import { countIceServers, toRtcIceServers } from './iceConfig';
 import { PeerLink, type ConnectionRoute } from './peerLink';
 import { HttpSignalingClient } from './httpSignalingClient';
-import { RelayEngine, type RelayLimits, type RelayStorage } from './relay';
+import { RelayEngine, relayLimitProblem, type RelayLimits, type RelayStorage } from './relay';
 import {
   createRelayKeyPair,
   deriveRelayKey,
@@ -127,6 +131,12 @@ export interface QuickState {
   route: ConnectionRoute | null;
   /** The direct connection dropped and is being repaired. */
   reconnecting: boolean;
+  /**
+   * A direct attempt failed and the session is connecting the devices another
+   * way on its own: relay mode, one more attempt, or (receiver) waiting for
+   * the sender to start either. Only ever true while connecting.
+   */
+  recovering: boolean;
   /** Files chosen by the sender that have not been offered yet. */
   pendingFiles: File[];
   transfer: TransferSnapshot | null;
@@ -175,6 +185,7 @@ const INITIAL: QuickState = {
   peer: null,
   route: null,
   reconnecting: false,
+  recovering: false,
   pendingFiles: [],
   transfer: null,
   rate: null,
@@ -194,6 +205,18 @@ const RETRY_WINDOW_MS = 5 * 60_000;
 const RETRY_WAIT_MS = 30_000;
 /** A sender that proposed relay mode waits this long for the other device's answer. */
 const RELAY_WAIT_MS = 20_000;
+/** Direct attempts started automatically after a failure (when relay mode isn't possible). */
+const AUTO_RETRIES = 1;
+/** Pause before an automatic attempt, so both devices have let go of the failed one. */
+const AUTO_RETRY_DELAY_MS = 1_000;
+/**
+ * A receiver whose attempt failed waits this long for the sender's next step
+ * (relay mode or another attempt). The sender notices the same failure at
+ * about the same time; this also covers its 30 s connection timeout.
+ */
+const RECOVERY_WAIT_MS = 30_000;
+/** Once the data channel is open, how long the other device's `hello` may take. */
+const HELLO_TIMEOUT_MS = 15_000;
 /** Relay messages kept while the relay is still being set up (only a few can be early). */
 const MAX_PENDING_RELAY_MESSAGES = 32;
 
@@ -208,7 +231,10 @@ const FRESH_CONNECTION = {
 const attemptOf = (payload: SignalPayload): number =>
   'attempt' in payload ? (payload.attempt ?? 0) : 0;
 
-type SessionTimer = 'setup' | 'retry-window' | 'retry-wait' | 'relay-wait';
+type SessionTimer =
+  'setup' | 'retry-window' | 'retry-wait' | 'relay-wait' | 'auto-retry' | 'recovery-wait' | 'hello';
+
+type ConnectionFailure = NonNullable<QuickState['failure']>;
 
 function mapSignalingError(code: SignalingErrorCode): QuickErrorCode {
   switch (code) {
@@ -250,8 +276,12 @@ export class QuickSession {
   private readonly meter = new RateMeter();
   private meterTransferId: string | null = null;
   private generation = 0;
-  /** Current connection attempt (0, then +1 per "Try again"). */
+  /** Current connection attempt (0, then +1 per new negotiation). */
   private attempt = 0;
+  /** Automatic attempts since the devices were last connected (or "Try again" was pressed). */
+  private autoRetries = 0;
+  /** Receiver: why its attempt failed, while it waits for the sender's next step. */
+  private recoveryFailure: ConnectionFailure | null = null;
   private readonly timers = new Map<SessionTimer, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly options: QuickSessionOptions = {}) {
@@ -329,35 +359,8 @@ export class QuickSession {
    */
   retryConnection(): void {
     if (!this.state.canRetry || !this.signaling) return;
-    this.clearTimer('retry-window');
-    const next = this.attempt + 1;
-    if (this.state.isHost) {
-      this.startAttempt(next);
-      return;
-    }
-    // Only the host offers, so ask it for the next attempt and wait for its offer.
-    this.releasePeer();
-    this.signaling.setPace?.('normal');
-    this.signaling.send({ type: 'signal', payload: { kind: 'retry', attempt: next } });
-    this.update(FRESH_CONNECTION, 'connecting');
-    const generation = this.generation;
-    this.setTimer('retry-wait', RETRY_WAIT_MS, () => {
-      if (generation !== this.generation || this.peerLink || this.linkPhase !== 'connecting')
-        return;
-      // Nothing came back from the host: report it like an attempt that heard nothing.
-      const servers = countIceServers(toRtcIceServers(this.iceServers));
-      this.connectionFailed({
-        attempt: next,
-        stunServers: servers.stun,
-        turnServers: servers.turn,
-        local: emptySummary(),
-        remote: emptySummary(),
-        iceStates: [],
-        durationMs: RETRY_WAIT_MS,
-        restarts: 0,
-        sameNetwork: false,
-      });
-    });
+    this.autoRetries = 0; // a fresh start: this attempt may recover on its own again
+    this.nextAttempt(false);
   }
 
   /**
@@ -367,34 +370,7 @@ export class QuickSession {
    */
   useRelay(): void {
     if (!this.state.canRelay || !this.signaling) return;
-    const generation = this.generation;
-    this.releasePeer(); // a direct attempt that is still trying
-    this.clearTimer('retry-window');
-    this.clearTimer('retry-wait');
-    this.relayPending = true;
-    this.offerWhenRelayReady = this.state.pendingFiles.length > 0;
-    this.signaling.setPace?.('normal');
-    this.update({ ...FRESH_CONNECTION, route: 'server' }, 'connecting');
-    createRelayKeyPair()
-      .then((keys) => {
-        if (generation !== this.generation || !this.relayPending) return;
-        this.relayKeys = keys;
-        this.signaling?.send({
-          type: 'signal',
-          payload: { kind: 'relay-hello', key: keys.publicKey },
-        });
-        this.setTimer('relay-wait', this.relaySetup?.answerTimeoutMs ?? RELAY_WAIT_MS, () => {
-          if (generation !== this.generation || !this.relayPending) return;
-          this.relayPending = false;
-          this.signaling?.setPace?.('standby');
-          this.update({ ...FRESH_CONNECTION, error: 'relay-unanswered' }, 'failed');
-        });
-      })
-      .catch(() => {
-        if (generation !== this.generation) return;
-        this.relayPending = false;
-        this.update({ ...FRESH_CONNECTION, error: 'internal' }, 'failed');
-      });
+    this.proposeRelay(false);
   }
 
   /** Sender: replaces the selection that will be offered next. */
@@ -445,6 +421,175 @@ export class QuickSession {
   private readonly handleVisibility = () => {
     if (document.visibilityState === 'visible') this.peerLink?.resume();
   };
+
+  /* ------------------------------------------------------------------------ */
+  /* Recovering from a failed attempt                                         */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * A direct attempt failed. Connects the devices another way on its own
+   * when there is one; shows the failure (with "Try again") when there isn't.
+   * `automatic: false` skips straight to showing it.
+   */
+  private connectionFailed(diagnostics: ConnectionDiagnostics, automatic = true): void {
+    const failure = { cause: classifyFailure(diagnostics), diagnostics };
+    if (automatic && this.recover(failure)) return;
+    this.showFailure(failure);
+    this.announceGaveUp();
+  }
+
+  /** Sender: nothing left to try automatically — a receiver waiting for it can stop. */
+  private announceGaveUp(): void {
+    if (this.state.role !== 'sender') return;
+    this.signaling?.send({ type: 'signal', payload: { kind: 'gave-up', attempt: this.attempt } });
+  }
+
+  /**
+   * Starts the next step without anyone pressing a button. The sender
+   * decides: relay mode when this server and the chosen files allow it (no
+   * direct path is likely to appear by itself), otherwise one more direct
+   * attempt. The receiver waits for that step, then gives up and explains.
+   * Returns false when there is nothing left to try automatically.
+   */
+  private recover(failure: ConnectionFailure): boolean {
+    const signaling = this.signaling;
+    if (!signaling?.isOpen || !this.state.peer || this.engine?.busy) return false;
+    const mayRetry = this.autoRetries < AUTO_RETRIES && this.attempt + 1 < MAX_CONNECTION_ATTEMPTS;
+    const generation = this.generation;
+    this.releasePeer();
+    if (this.state.role === 'sender') {
+      if (this.relayPossible()) {
+        this.proposeRelay(true);
+        return true;
+      }
+      if (!mayRetry) return false;
+      this.autoRetries += 1;
+      this.update({ ...FRESH_CONNECTION, recovering: true }, 'connecting');
+      this.setTimer('auto-retry', AUTO_RETRY_DELAY_MS, () => {
+        if (generation === this.generation && this.linkPhase === 'connecting' && !this.peerLink)
+          this.nextAttempt(true);
+      });
+      return true;
+    }
+    // Relay mode and new attempts are the sender's to start (see routeSignal, handleRelayHello).
+    const senderMayRecover = this.autoRetries === 0 && (!!this.relaySetup || mayRetry);
+    if (!senderMayRecover) return false;
+    this.recoveryFailure = failure;
+    // The sender may not have noticed yet (its browser can keep trying for up to 30 s).
+    signaling.send({ type: 'signal', payload: { kind: 'attempt-failed', attempt: this.attempt } });
+    signaling.setPace?.('normal');
+    this.update({ ...FRESH_CONNECTION, recovering: true }, 'connecting');
+    this.setTimer('recovery-wait', RECOVERY_WAIT_MS, () => {
+      if (generation !== this.generation || this.linkPhase !== 'connecting') return;
+      if (this.peerLink || this.engine || this.relayPeerKey) return; // the sender did act
+      this.showFailure(failure);
+    });
+    return true;
+  }
+
+  /** Relay mode would work from here: the server stores packages and the selection fits. */
+  private relayPossible(): boolean {
+    const setup = this.relaySetup;
+    return (
+      !!setup &&
+      this.state.role === 'sender' &&
+      !this.relayPending &&
+      !(this.engine instanceof RelayEngine) &&
+      relayLimitProblem(this.state.pendingFiles, setup.limits) === null
+    );
+  }
+
+  /** Reports a failed attempt and keeps signaling (slowly) for a possible "Try again". */
+  private showFailure(failure: ConnectionFailure): void {
+    this.releasePeer();
+    this.clearTimer('auto-retry');
+    this.clearTimer('recovery-wait');
+    this.recoveryFailure = null;
+    this.update({ ...FRESH_CONNECTION, error: 'connection-failed', failure }, 'failed');
+    this.signaling?.setPace?.('standby');
+    const generation = this.generation;
+    this.setTimer('retry-window', RETRY_WINDOW_MS, () => {
+      if (generation !== this.generation || this.linkPhase !== 'failed') return;
+      this.closeSignaling();
+      this.update({});
+    });
+  }
+
+  /** Starts the next direct attempt (host), or asks the host to (guest). */
+  private nextAttempt(automatic: boolean): void {
+    const signaling = this.signaling;
+    if (!signaling) return;
+    this.clearTimer('retry-window');
+    const next = this.attempt + 1;
+    if (this.state.isHost) {
+      this.startAttempt(next, undefined, automatic);
+      return;
+    }
+    // Only the host offers, so ask it for the next attempt and wait for its offer.
+    this.releasePeer();
+    signaling.setPace?.('normal');
+    signaling.send({ type: 'signal', payload: { kind: 'retry', attempt: next } });
+    this.update({ ...FRESH_CONNECTION, recovering: automatic }, 'connecting');
+    const generation = this.generation;
+    this.setTimer('retry-wait', RETRY_WAIT_MS, () => {
+      if (generation !== this.generation || this.peerLink || this.linkPhase !== 'connecting')
+        return;
+      // Nothing came back from the host: report it like an attempt that heard nothing.
+      this.showFailure(this.emptyFailure(next, RETRY_WAIT_MS));
+      this.announceGaveUp();
+    });
+  }
+
+  /** A failed attempt that heard nothing from the other device. */
+  private emptyFailure(attempt: number, durationMs: number): ConnectionFailure {
+    const servers = countIceServers(toRtcIceServers(this.iceServers));
+    const diagnostics: ConnectionDiagnostics = {
+      attempt,
+      stunServers: servers.stun,
+      turnServers: servers.turn,
+      local: emptySummary(),
+      remote: emptySummary(),
+      iceStates: [],
+      durationMs,
+      restarts: 0,
+      sameNetwork: false,
+    };
+    return { cause: classifyFailure(diagnostics), diagnostics };
+  }
+
+  /** Sender: proposes relay mode (half of the key agreement) and waits for the answer. */
+  private proposeRelay(automatic: boolean): void {
+    const generation = this.generation;
+    this.releasePeer(); // a direct attempt that is still trying
+    this.clearTimer('retry-window');
+    this.clearTimer('retry-wait');
+    this.clearTimer('auto-retry');
+    this.relayPending = true;
+    this.offerWhenRelayReady = this.state.pendingFiles.length > 0;
+    this.signaling?.setPace?.('normal');
+    this.update({ ...FRESH_CONNECTION, route: 'server', recovering: automatic }, 'connecting');
+    createRelayKeyPair()
+      .then((keys) => {
+        if (generation !== this.generation || !this.relayPending) return;
+        this.relayKeys = keys;
+        this.signaling?.send({
+          type: 'signal',
+          payload: { kind: 'relay-hello', key: keys.publicKey },
+        });
+        this.setTimer('relay-wait', this.relaySetup?.answerTimeoutMs ?? RELAY_WAIT_MS, () => {
+          if (generation !== this.generation || !this.relayPending) return;
+          this.relayPending = false;
+          this.signaling?.setPace?.('standby');
+          this.update({ ...FRESH_CONNECTION, error: 'relay-unanswered' }, 'failed');
+          this.announceGaveUp();
+        });
+      })
+      .catch(() => {
+        if (generation !== this.generation) return;
+        this.relayPending = false;
+        this.update({ ...FRESH_CONNECTION, error: 'internal' }, 'failed');
+      });
+  }
 
   /* ------------------------------------------------------------------------ */
   /* Signaling                                                                */
@@ -627,7 +772,15 @@ export class QuickSession {
         payload.attempt > this.attempt &&
         this.canStartAttempt(payload.attempt)
       )
-        this.startAttempt(payload.attempt);
+        this.followAttempt(payload.attempt);
+      return;
+    }
+    if (payload.kind === 'attempt-failed') {
+      this.handleReceiverFailed(payload.attempt);
+      return;
+    }
+    if (payload.kind === 'gave-up') {
+      this.handleSenderGaveUp(payload.attempt);
       return;
     }
     const attempt = attemptOf(payload);
@@ -638,8 +791,8 @@ export class QuickSession {
     }
     const isOffer = payload.kind === 'description' && payload.description.type === 'offer';
     if (isOffer && (attempt > this.attempt || !this.peerLink) && this.canStartAttempt(attempt)) {
-      // The host started a new attempt (after "Try again" on either device).
-      this.startAttempt(attempt, payload);
+      // The host started a new attempt (on its own, or after "Try again" on either device).
+      this.followAttempt(attempt, payload);
       return;
     }
     if (attempt === this.attempt && this.peerLink) void this.peerLink.handleSignal(payload);
@@ -650,14 +803,59 @@ export class QuickSession {
     return attempt < MAX_CONNECTION_ATTEMPTS && !!this.state.peer && !this.engine?.busy;
   }
 
+  /**
+   * The other device started attempt `attempt`. While this device recovers
+   * on its own, that's the sender's automatic attempt; otherwise someone
+   * pressed "Try again", which starts the automatic steps afresh.
+   */
+  private followAttempt(attempt: number, offer?: SignalPayload): void {
+    this.autoRetries = this.state.recovering ? this.autoRetries + 1 : 0;
+    this.startAttempt(attempt, offer);
+  }
+
+  /**
+   * Sender: the receiver closed its side of attempt `attempt`, so that attempt
+   * can't connect any more; take the next step now instead of waiting for
+   * this browser to notice.
+   */
+  private handleReceiverFailed(attempt: number): void {
+    const link = this.peerLink;
+    if (this.state.role !== 'sender' || attempt !== this.attempt || !link || link.isOpen) return;
+    const diagnostics = link.diagnostics();
+    this.releasePeer();
+    this.connectionFailed(diagnostics);
+  }
+
+  /**
+   * Receiver: the sender has nothing left to try after attempt `attempt`, so
+   * this device stops waiting and explains the failure too.
+   */
+  private handleSenderGaveUp(attempt: number): void {
+    if (this.state.role !== 'receiver' || attempt < this.attempt) return;
+    if (this.linkPhase !== 'connecting' && this.linkPhase !== 'peer-connected') return;
+    if (this.engine instanceof RelayEngine || this.relayPeerKey) return;
+    const diagnostics = this.peerLink?.diagnostics() ?? this.recoveryFailure?.diagnostics;
+    this.showFailure(
+      diagnostics
+        ? { cause: classifyFailure(diagnostics), diagnostics }
+        : this.emptyFailure(attempt, 0),
+    );
+  }
+
   /** Replaces the current peer connection with a fresh negotiation as `attempt`. */
-  private startAttempt(attempt: number, offer?: SignalPayload): void {
+  private startAttempt(attempt: number, offer?: SignalPayload, recovering?: boolean): void {
     this.releasePeer();
     this.clearTimer('retry-window');
     this.clearTimer('retry-wait');
+    this.clearTimer('auto-retry');
+    this.clearTimer('recovery-wait');
+    this.recoveryFailure = null;
     this.attempt = attempt;
     this.signaling?.setPace?.('normal');
-    this.update(FRESH_CONNECTION, 'peer-connected');
+    this.update(
+      recovering === undefined ? FRESH_CONNECTION : { ...FRESH_CONNECTION, recovering },
+      'peer-connected',
+    );
     this.startPeer(this.state.isHost);
     if (offer) void this.peerLink?.handleSignal(offer);
   }
@@ -673,7 +871,8 @@ export class QuickSession {
     try {
       link = this.createPeerLink(isOfferer, generation);
     } catch {
-      this.update({ error: 'connection-failed' }, 'failed');
+      // This browser couldn't set up a peer connection at all; relay mode may still work.
+      this.connectionFailed(this.emptyFailure(this.attempt, 0).diagnostics);
       return;
     }
     this.peerLink = link;
@@ -689,10 +888,10 @@ export class QuickSession {
       if (attemptOf(payload) === this.attempt) void link.handleSignal(payload);
     }
     link.start().catch(() => {
-      if (generation === this.generation) {
-        this.update({ error: 'connection-failed' }, 'failed');
-        this.releasePeer();
-      }
+      if (generation !== this.generation || this.peerLink !== link) return;
+      const diagnostics = link.diagnostics();
+      this.releasePeer();
+      this.connectionFailed(diagnostics);
     });
   }
 
@@ -701,6 +900,8 @@ export class QuickSession {
     if (generation !== this.generation) return;
     switch (event.type) {
       case 'ready':
+        this.autoRetries = 0;
+        this.clearTimer('hello');
         if (link) {
           this.signaling?.setPace?.('quiet');
           this.update({}, 'connected');
@@ -747,7 +948,7 @@ export class QuickSession {
   private createPeerLink(isOfferer: boolean, generation: number): PeerLink {
     const attempt = this.attempt;
     const current = () => generation === this.generation && attempt === this.attempt;
-    return new PeerLink({
+    const link: PeerLink = new PeerLink({
       iceServers: this.iceServers,
       isOfferer,
       attempt,
@@ -755,6 +956,13 @@ export class QuickSession {
       onOpen: () => {
         if (!current()) return;
         this.engine?.start();
+        // The channel is up; without the other side's hello, it still isn't a connection.
+        this.setTimer('hello', HELLO_TIMEOUT_MS, () => {
+          if (!current() || this.linkPhase === 'connected' || this.peerLink !== link) return;
+          const diagnostics = link.diagnostics();
+          this.releasePeer();
+          this.connectionFailed(diagnostics);
+        });
       },
       onFailed: (_reason, diagnostics) => {
         if (!current()) return;
@@ -772,6 +980,7 @@ export class QuickSession {
         this.update({ reconnecting });
       },
     });
+    return link;
   }
 
   /* ------------------------------------------------------------------------ */
@@ -855,6 +1064,9 @@ export class QuickSession {
     this.clearTimer('retry-window');
     this.clearTimer('retry-wait');
     this.clearTimer('relay-wait');
+    this.clearTimer('auto-retry');
+    this.clearTimer('recovery-wait');
+    this.recoveryFailure = null;
     this.relayPending = false;
     this.relayKeys = null;
     const engine = new RelayEngine({
@@ -871,25 +1083,6 @@ export class QuickSession {
     this.pendingRelayMessages = [];
     for (const message of early) engine.handleMessage(message.seq, message.data);
     engine.start();
-  }
-
-  /** Reports a failed attempt and keeps signaling (slowly) for a possible "Try again". */
-  private connectionFailed(diagnostics: ConnectionDiagnostics): void {
-    this.update(
-      {
-        ...FRESH_CONNECTION,
-        error: 'connection-failed',
-        failure: { cause: classifyFailure(diagnostics), diagnostics },
-      },
-      'failed',
-    );
-    this.signaling?.setPace?.('standby');
-    const generation = this.generation;
-    this.setTimer('retry-window', RETRY_WINDOW_MS, () => {
-      if (generation !== this.generation || this.linkPhase !== 'failed') return;
-      this.closeSignaling();
-      this.update({});
-    });
   }
 
   private handlePeerGone(): void {
@@ -932,6 +1125,8 @@ export class QuickSession {
     this.peerSaidBye = false;
     this.pendingSignals = [];
     this.attempt = 0;
+    this.autoRetries = 0;
+    this.recoveryFailure = null;
     this.sessionId = null;
     this.relayKeys = null;
     this.relayPending = false;
@@ -978,6 +1173,7 @@ export class QuickSession {
   }
 
   private releasePeer(): void {
+    this.clearTimer('hello');
     this.engine?.dispose();
     this.engine = null;
     this.peerLink?.close();
@@ -994,6 +1190,8 @@ export class QuickSession {
     if (linkPhase) this.linkPhase = linkPhase;
     const next: QuickState = { ...this.state, ...patch };
     next.phase = derivePhase(this.linkPhase, next.transfer);
+    next.recovering =
+      next.recovering && (this.linkPhase === 'connecting' || this.linkPhase === 'peer-connected');
     const failedToConnect =
       this.linkPhase === 'failed' &&
       (next.error === 'connection-failed' || next.error === 'relay-unanswered');

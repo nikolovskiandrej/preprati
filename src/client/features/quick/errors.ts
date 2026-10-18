@@ -115,12 +115,8 @@ function describeConnectionFailure(
   recovery: Recovery,
 ): QuickErrorView {
   const failure = state.failure;
-  // The receiver can't start relay mode, but the sender can — often the same person, on
-  // the other device. Relay mode needs signaling, which "Try again" also needs.
-  const relayHint: MessageKey | undefined =
-    state.role === 'receiver' && state.relay && state.canRetry
-      ? 'errors.connectionRelayReceiver'
-      : undefined;
+  // The sending device switches to relay mode on its own whenever it can, so a failure that
+  // gets this far is one relay mode couldn't fix; only the sender can still choose a link.
   const linkHint: MessageKey | undefined =
     !shareAvailable || state.canRelay
       ? undefined
@@ -132,7 +128,7 @@ function describeConnectionFailure(
   return {
     title: 'errors.titles.connection',
     message: failure ? BY_CAUSE[failure.cause] : 'errors.connectionFailed',
-    hint: relayHint ?? linkHint ?? (failure ? undefined : 'errors.connectionFailedRelay'),
+    hint: linkHint ?? (failure ? undefined : 'errors.connectionFailedRelay'),
     recovery,
     connection: {
       canRetry: state.canRetry,

@@ -122,8 +122,13 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
       const canRelay = error.connection?.canRelay === true;
       // A sender who hasn't chosen files yet sees the button disabled until they do.
       const offerRelay = canRelay && (relayFits || selected.length === 0);
+      const undelivered = phase === 'disconnected' && state.transfer?.status !== 'completed';
       const offerLink =
-        !!error.connection && !canRelay && shareAvailable && role === 'sender' && files.length > 0;
+        (!!error.connection || undelivered) &&
+        !canRelay &&
+        shareAvailable &&
+        role === 'sender' &&
+        files.length > 0;
       const actions =
         error.recovery === 'retry-send' ? (
           <Button variant="primary" onClick={sendNow} disabled={files.length === 0}>
@@ -234,6 +239,8 @@ export default function JoinScreen({ params }: { params: { token: string } }) {
             <ConnectingStatus
               device={device}
               viaServer={state.route === 'server'}
+              recovering={state.recovering}
+              autoFallback={!!state.relay}
               slowAction={
                 role === 'sender' && state.canRelay && relayFits ? (
                   <Button variant="inverse" icon={LockIcon} onClick={sendThroughServer}>

@@ -29,6 +29,7 @@ import type {
   SignalPayload,
   TransferRole,
 } from '../../shared/signaling';
+import { recoveryStep, sessionTag, type SignalingLog } from './events';
 
 export interface SignalingPeer {
   readonly connectionId: string;
@@ -60,6 +61,8 @@ export interface SessionManagerOptions {
   maxSessionsPerIp: number;
   iceServers: (sessionId: string) => IceServerConfig[];
   now?: () => number;
+  /** Lifecycle events for the server log (see ./events.ts). */
+  log?: SignalingLog;
 }
 
 export type SessionResult = { ok: true } | { ok: false; code: SignalingErrorCode };
@@ -75,9 +78,11 @@ export class SessionManager {
   private readonly byPeer = new Map<string, Session>();
   private readonly perIp = new Map<string, number>();
   private readonly now: () => number;
+  private readonly log: SignalingLog;
 
   constructor(private readonly options: SessionManagerOptions) {
     this.now = options.now ?? Date.now;
+    this.log = options.log ?? (() => undefined);
   }
 
   get sessionCount(): number {
@@ -117,6 +122,7 @@ export class SessionManager {
     this.byCode.set(code, id);
     this.byPeer.set(peer.connectionId, session);
     this.perIp.set(peer.ip, (this.perIp.get(peer.ip) ?? 0) + 1);
+    this.log('session-created', { session: sessionTag(id), role, transport: 'websocket' });
 
     peer.send({
       type: 'session-created',
@@ -133,12 +139,19 @@ export class SessionManager {
     if (this.byPeer.has(peer.connectionId)) return { ok: false, code: 'already-in-session' };
     const sessionId = target.via === 'link' ? target.sessionId : this.byCode.get(target.code);
     const session = sessionId ? this.sessions.get(sessionId) : undefined;
-    if (!session) return { ok: false, code: 'session-not-found' };
+    if (!session) {
+      this.log('join-failed', { reason: 'session-not-found' });
+      return { ok: false, code: 'session-not-found' };
+    }
     if (session.state === 'waiting' && this.now() >= session.pairingExpiresAt) {
+      this.log('join-failed', { reason: 'session-expired' });
       this.expire(session);
       return { ok: false, code: 'session-expired' };
     }
-    if (session.guest) return { ok: false, code: 'session-full' };
+    if (session.guest) {
+      this.log('join-failed', { session: sessionTag(session.id), reason: 'session-full' });
+      return { ok: false, code: 'session-full' };
+    }
 
     const needsApproval = target.via === 'code' && session.hostRole === 'sender';
     session.guest = peer;
@@ -155,6 +168,11 @@ export class SessionManager {
         this.armPairingTimer(session);
       }
     }
+    this.log('device-joined', {
+      session: sessionTag(session.id),
+      via: target.via,
+      approval: needsApproval,
+    });
 
     peer.send({
       type: 'session-joined',
@@ -176,6 +194,7 @@ export class SessionManager {
     }
     session.state = 'paired';
     this.clearPairingTimer(session);
+    this.log('peer-approved', { session: sessionTag(session.id) });
     session.guest.send({ type: 'peer-approved' });
     return { ok: true };
   }
@@ -191,6 +210,7 @@ export class SessionManager {
     session.guest = null;
     session.guestDevice = null;
     session.state = 'waiting';
+    this.log('peer-declined', { session: sessionTag(session.id) });
     guest.send({ type: 'peer-declined' });
     // The original pairing window still applies to the next device.
     if (this.now() >= session.pairingExpiresAt) this.expire(session);
@@ -202,6 +222,8 @@ export class SessionManager {
     if (!session) return { ok: false, code: 'not-in-session' };
     if (session.state !== 'paired' || !session.guest) return { ok: false, code: 'not-allowed' };
     const target = session.host === peer ? session.guest : session.host;
+    const step = recoveryStep(payload);
+    if (step) this.log('recovery', { session: sessionTag(session.id), ...step });
     target.send({ type: 'signal', payload });
     return { ok: true };
   }
@@ -215,6 +237,11 @@ export class SessionManager {
     const session = this.byPeer.get(peer.connectionId);
     if (!session) return;
     const other = session.host === peer ? session.guest : session.host;
+    this.log('peer-left', {
+      session: sessionTag(session.id),
+      reason,
+      by: session.host === peer ? 'host' : 'guest',
+    });
     if (session.host !== peer && session.state === 'pending-approval') {
       // A guest awaiting approval walked away: let the next device join.
       this.byPeer.delete(peer.connectionId);
@@ -239,6 +266,7 @@ export class SessionManager {
   }
 
   private expire(session: Session): void {
+    this.log('session-expired', { session: sessionTag(session.id) });
     session.host.send({ type: 'session-expired' });
     session.guest?.send({ type: 'session-expired' });
     this.destroy(session);
@@ -246,6 +274,7 @@ export class SessionManager {
 
   private closeForLifetime(session: Session): void {
     if (!this.sessions.has(session.id)) return;
+    this.log('session-closed', { session: sessionTag(session.id), reason: 'lifetime-exceeded' });
     session.host.send({ type: 'session-closed', reason: 'lifetime-exceeded' });
     session.guest?.send({ type: 'session-closed', reason: 'lifetime-exceeded' });
     this.destroy(session);

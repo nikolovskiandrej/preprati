@@ -23,6 +23,7 @@ import { createKv, type KvStore } from './kv';
 import { KvUsageTracker } from './shares/kvUsage';
 import { registerShareRoutes } from './shares/routes';
 import { ShareService } from './shares/shareService';
+import type { SignalingLog } from './signaling/events';
 import { registerHttpSignalingRoutes } from './signaling/httpRoutes';
 import { iceServersFor } from './signaling/ice';
 import { PollingSignaling } from './signaling/pollingSignaling';
@@ -150,6 +151,8 @@ export async function buildApp(
 
   /* ------------------------------- Signaling ------------------------------- */
   const kv = options.kv !== undefined ? options.kv : createKv(config.kv);
+  const signalingLog: SignalingLog = (event, details) =>
+    app.log.info({ ...details, event }, 'signaling');
   const sessions = new SessionManager({
     pairingTtlMs: config.sessions.pairingTtlMs,
     maxLifetimeMs: config.sessions.maxLifetimeMs,
@@ -157,6 +160,7 @@ export async function buildApp(
     maxSessionsPerIp: config.sessions.maxSessionsPerIp,
     iceServers: (sessionId) => iceServersFor(config.ice, sessionId, now()),
     now,
+    log: signalingLog,
   });
   // WebSocket signaling for long-lived servers; HTTP polling (shared KV state) for serverless.
   let signaling: { close(): void } = { close: () => sessions.shutdown() };
@@ -174,6 +178,7 @@ export async function buildApp(
         joinFailuresPer10Min: config.rateLimits.joinFailuresPer10Min,
         iceServers: (sessionId) => iceServersFor(config.ice, sessionId, now()),
         now,
+        log: signalingLog,
       }),
     );
   }

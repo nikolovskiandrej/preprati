@@ -30,6 +30,7 @@ P=preprati-lab
 APP=http://198.18.0.2:4400
 STUN_URLS=stun:198.18.0.2:3478,stun:198.18.0.3:3478
 HTTP_SIGNALING=(SIGNALING_TRANSPORT=http KV_DRIVER=memory)
+NO_RELAY_MODE=(STORAGE_DRIVER=) # no share storage on the server, so no relay mode either
 
 up() {
   [ -f "$PROJECT/dist/server/index.js" ] || { echo "Run npm run build first."; exit 1; }
@@ -158,7 +159,7 @@ separate_networks() {
   true
 }
 
-# devices <tag> <payload MB> [retry|relay]: starts both devices in the background.
+# devices <tag> <payload MB> [retry]: starts both devices in the background.
 devices() {
   local tag=$1
   rm -f "$RESULTS"/*-"$tag"* "$RESULTS"/code-"$tag"
@@ -183,14 +184,14 @@ scenarios() {
     1) echo "1. Two home networks (typical routers), HTTP signaling as on Vercel"
        nat a home; nat b home; server "${HTTP_SIGNALING[@]}"
        devices s1 2; wait_devices; report s1 ;;
-    2) echo "2. A home network and a strict NAT (as on many mobile networks), no relay"
+    2) echo "2. A home network and a strict NAT (as on many mobile networks), no TURN"
        nat a home; nat b strict; server "${HTTP_SIGNALING[@]}"
        devices s2 2; wait_devices; report s2 ;;
-    3) echo "3. Device A's network blocks UDP (strict office/school Wi-Fi), no relay"
+    3) echo "3. Device A's network blocks UDP (strict office/school Wi-Fi), no TURN"
        nat a no-udp; nat b home; server "${HTTP_SIGNALING[@]}"
        devices s3 2; wait_devices; report s3 ;;
-    4) echo "4. Strict NAT fails, B moves to a home network, B presses \"Try again\""
-       nat a home; nat b strict; server "${HTTP_SIGNALING[@]}"
+    4) echo "4. No relay mode: strict NAT fails twice, B moves to a home network, B presses \"Try again\""
+       nat a home; nat b strict; server "${HTTP_SIGNALING[@]}" "${NO_RELAY_MODE[@]}"
        devices s4 2 retry
        for _ in $(seq 1 300); do
          [ -f "$RESULTS/failed-s4-host" ] && [ -f "$RESULTS/failed-s4-guest" ] && break; sleep 0.2
@@ -211,12 +212,15 @@ scenarios() {
     7) echo "7. Two home networks, WebSocket signaling (self-hosted Node server)"
        nat a home; nat b home; server
        devices s7 2; wait_devices; report s7 ;;
-    8) echo "8. One strict-NAT Wi-Fi that keeps its devices apart; B sends through preprati."
+    8) echo "8. One strict-NAT Wi-Fi that keeps its devices apart, no TURN"
        nat a strict; same_network; server "${HTTP_SIGNALING[@]}"
-       devices s8 3 relay; wait_devices; separate_networks; report s8 ;;
-    9) echo "9. A home network and a strict NAT, no TURN relay; B sends through preprati."
-       nat a home; nat b strict; server "${HTTP_SIGNALING[@]}"
-       devices s9 3 relay; wait_devices; report s9 ;;
+       devices s8 3; wait_devices; separate_networks; report s8 ;;
+    9) echo "9. No relay mode: B's network drops UDP during the first attempt, then recovers"
+       nat a home; nat b no-udp; server "${HTTP_SIGNALING[@]}" "${NO_RELAY_MODE[@]}"
+       devices s9 2
+       for _ in $(seq 1 300); do [ -f "$RESULTS/recovering-s9-guest" ] && break; sleep 0.2; done
+       nat b home; echo "   (B's network works again)"
+       wait_devices; report s9 ;;
     *) echo "Unknown scenario $s" ;;
     esac
   done

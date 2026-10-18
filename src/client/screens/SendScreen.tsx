@@ -119,8 +119,11 @@ export default function SendScreen() {
       const retry = error.connection?.canRetry === true;
       const canRelay = error.connection?.canRelay === true;
       const offerRelay = canRelay && relayFits;
-      // Without relay mode (no signaling left), a share link still gets the files there.
-      const offerLink = !!error.connection && !canRelay && shareAvailable && files.length > 0;
+      // Without relay mode (no signaling left, or the other device left before the files got
+      // there), a share link still gets them there.
+      const undelivered = phase === 'disconnected' && state.transfer?.status !== 'completed';
+      const offerLink =
+        (!!error.connection || undelivered) && !canRelay && shareAvailable && files.length > 0;
       const actions =
         error.recovery === 'retry-send' ? (
           <Button variant="primary" onClick={sendNow} disabled={files.length === 0}>
@@ -226,6 +229,8 @@ export default function SendScreen() {
             <ConnectingStatus
               device={device}
               viaServer={state.route === 'server'}
+              recovering={state.recovering}
+              autoFallback={relayFits}
               slowAction={
                 state.canRelay && relayFits ? relayButton('inverse', 'relaySendInstead') : null
               }

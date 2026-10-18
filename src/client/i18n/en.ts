@@ -128,6 +128,10 @@ export const en = {
     connectingHint: 'Setting up a direct, encrypted connection.',
     connectingServer: 'Connecting to {device} through preprati.…',
     connectingServerHint: 'Agreeing on a key that only the two devices know.',
+    connectingServerRecovering:
+      'A direct connection wasn’t possible, so the files will go through preprati. — encrypted so that only the two devices can open them.',
+    connectingRecovering:
+      'The direct connection didn’t work, so preprati. is trying another way. You don’t need to do anything.',
     connectedTo: 'Connected to {device}',
     routeDirect: 'Direct connection',
     routeRelay: 'Relayed connection',
@@ -181,6 +185,8 @@ export const en = {
     invalidLink: 'This connection link is incomplete. Check it, or enter the pairing code instead.',
     enterCode: 'Enter a code',
     connectingSlow: 'Still trying… Devices on different networks can take up to half a minute.',
+    connectingSlowAuto:
+      'Still trying… If the devices can’t connect directly, preprati. switches to another way on its own.',
     reconnecting: 'Connection interrupted. Reconnecting…',
     reconnectingHint: 'Files keep moving as soon as the devices find each other again.',
     tryAgain: 'Try again',
@@ -314,8 +320,6 @@ export const en = {
       'Both devices are online, but their networks don’t allow a direct connection between them. This often happens when one of them uses mobile data. Try both devices on the same Wi-Fi.',
     connectionSameNetworkBlocked:
       'Both devices are on the same network, but it doesn’t let them connect to each other directly. Some routers keep devices apart — guest networks usually do — and so does a VPN on either device.',
-    connectionRelayReceiver:
-      'Or, on {device}, choose “Send through preprati.” — it works on any network.',
     connectionLinkSender: 'Or send the files as a link, which works on any network.',
     connectionLinkReceiver:
       'Or ask the sender to share the files as a link, which works on any network.',

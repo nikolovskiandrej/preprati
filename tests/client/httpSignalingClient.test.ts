@@ -73,20 +73,35 @@ describe('HttpSignalingClient', () => {
       relayed.push((await guestInbox.next('signal')).payload);
     expect(relayed).toEqual(payloads);
 
-    // Each connection numbers its sends 1, 2, 3… so retries can be recognised.
-    const byConnection = new Map<string, number[]>();
+    // Each connection numbers its messages 1, 2, 3… so retries can be recognised. A request
+    // carries the number of its first message; what queued up meanwhile shares a request.
+    const byConnection = new Map<string, Array<{ seq: number; count: number }>>();
     for (const request of server.requests.filter((r) => r.url === '/api/signal/send')) {
       const id = String(request.headers['x-signal-connection']);
+      const body: unknown = JSON.parse(request.body!.toString());
       byConnection.set(id, [
         ...(byConnection.get(id) ?? []),
-        Number(request.headers['x-signal-seq']),
+        {
+          seq: Number(request.headers['x-signal-seq']),
+          count: Array.isArray(body) ? body.length : 1,
+        },
       ]);
     }
-    expect([...byConnection.values()].map((seqs) => seqs.length).sort()).toEqual([
+    const sends = [...byConnection.values()];
+    expect(sends.map((requests) => requests.reduce((n, r) => n + r.count, 0)).sort()).toEqual([
       1,
       payloads.length + 1,
     ]);
-    for (const seqs of byConnection.values()) expect(seqs).toEqual(seqs.map((_, i) => i + 1));
+    for (const requests of sends) {
+      let next = 1;
+      for (const { seq, count } of requests) {
+        expect(seq).toBe(next);
+        next += count;
+      }
+    }
+    // The offer went out at once; the candidates behind it shared the next request.
+    const hostRequests = sends.find((requests) => requests.length > 1)!;
+    expect(hostRequests.length).toBeLessThan(payloads.length + 1);
 
     guest.close(); // sends the disconnect beacon (fetch keepalive in jsdom)
     expect(guest.isOpen).toBe(false);
@@ -254,6 +269,23 @@ describe('HttpSignalingClient pacing', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(received).toEqual(['peer-left', 'session-expired']);
     expect(acks.slice(0, 3)).toEqual(['0', '1', '2']);
+    client.close();
+  });
+
+  it('reports the channel closed when the page goes into the back/forward cache', async () => {
+    vi.useFakeTimers();
+    fakeServer();
+    const client = new HttpSignalingClient('http://signal.test');
+    const closed: string[] = [];
+    client.onClose((reason) => closed.push(reason));
+    await client.connect();
+    window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+    expect(client.isOpen).toBe(false);
+    expect(closed).toEqual(['closed']);
+    const disconnects = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).endsWith('/api/signal/disconnect'));
+    expect(disconnects).toHaveLength(1); // the server ends the session for the other device
     client.close();
   });
 });

@@ -101,7 +101,14 @@ export default function ReceiveScreen() {
       case 'connecting':
         return {
           key: state.route === 'server' ? 'connecting-server' : 'connecting',
-          node: <ConnectingStatus device={device} viaServer={state.route === 'server'} />,
+          node: (
+            <ConnectingStatus
+              device={device}
+              viaServer={state.route === 'server'}
+              recovering={state.recovering}
+              autoFallback={!!state.relay}
+            />
+          ),
         };
       case 'connected':
         return {

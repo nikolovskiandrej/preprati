@@ -420,6 +420,72 @@ describe('PollingSignaling', () => {
     expect(() => parse({ kind: 'relay-message', seq: -1, data: 'D'.repeat(120) })).toThrow();
   });
 
+  it('relays only for the two members, even when a stale record names the session', async () => {
+    const { host, created } = await hostSession('receiver');
+    const guest = await device('198.51.100.7');
+    await guest.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Phone'),
+    });
+    await host.poll();
+    // A third connection whose (stale, say from a declined join) record still names the session.
+    const outsider = await signaling.connect('192.0.2.66');
+    const record = await signaling.authenticate(outsider.connectionId, outsider.token);
+    await signaling.handle(
+      { ...record!, sessionId: created.sessionId, role: 'guest' },
+      {
+        type: 'signal',
+        payload: { kind: 'retry', attempt: 3 },
+      },
+    );
+    expect(await host.poll()).toEqual([]);
+    expect((await signaling.read(outsider.connectionId)).messages).toEqual([
+      { type: 'error', code: 'not-allowed' },
+    ]);
+  });
+
+  it('logs the lifecycle and recovery steps without ids or codes', async () => {
+    const events: Array<[string, Record<string, unknown>]> = [];
+    signaling = new PollingSignaling(kv, {
+      pairingTtlMs: PAIRING_TTL,
+      maxLifetimeMs: 60 * 60_000,
+      presenceTtlMs: PRESENCE_TTL,
+      maxSessionsPerIpPer10Min: 3,
+      joinFailuresPer10Min: 2,
+      iceServers: () => [],
+      now: () => now,
+      log: (event, details) => events.push([event, details]),
+    });
+    const { host, created } = await hostSession('receiver');
+    const guest = await device('198.51.100.7');
+    await guest.send({
+      type: 'join-session',
+      target: { via: 'link', sessionId: created.sessionId },
+      device: label('Phone'),
+    });
+    await host.send({ type: 'signal', payload: { kind: 'candidate', candidate: null } });
+    await host.send({ type: 'signal', payload: { kind: 'attempt-failed', attempt: 0 } });
+    await guest.send({ type: 'signal', payload: { kind: 'gave-up', attempt: 1 } });
+    await guest.leave();
+
+    expect(events.map(([event, details]) => [event, details.step ?? details.reason ?? ''])).toEqual(
+      [
+        ['session-created', ''],
+        ['device-joined', ''],
+        ['recovery', 'attempt-failed'],
+        ['recovery', 'gave-up'],
+        ['peer-left', 'left'],
+      ],
+    );
+    const tags = new Set(events.map(([, details]) => details.session));
+    expect(tags.size).toBe(1); // one session, one tag to follow it by
+    const logged = JSON.stringify(events);
+    expect(logged).not.toContain(created.sessionId);
+    expect(logged).not.toContain(created.code);
+    expect(logged).not.toContain('Phone');
+  });
+
   it('claims each message number only once', async () => {
     const client = await device();
     expect(await signaling.claimSequence(client.connectionId, 1)).toBe(true);

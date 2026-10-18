@@ -2,11 +2,20 @@
 
 How Quick Transfer connects two devices — on different networks (home networks, mobile data, different cities), or on one network that doesn't let them reach each other. It covers what works without spending anything, what can't work directly, what the app does then, and how to test it.
 
-**In short:** the app is publicly reachable (HTTPS on Vercel), signaling works from any network, and two free STUN servers let most network combinations connect **directly**. Some can't connect directly: a strict NAT on mobile data, a network that blocks UDP, or — as on the developer's own home Wi-Fi — one network that keeps its devices apart. For those, the sender can choose **Send through preprati.** (relay mode, §5): the files go end-to-end encrypted through the app's existing temporary storage, inside the same session, with nothing to share by hand. It works on any network that can open the website, costs nothing within the free plans, and the app explains in plain language why it was needed. **Try again** reconnects without a new code. An optional TURN relay can still be added; it is off by default because relays cost bandwidth.
+**In short:** the app is publicly reachable (HTTPS on Vercel), signaling works from any network, and two free STUN servers let most network combinations connect **directly**. Some can't connect directly: a strict NAT on mobile data, a network that blocks UDP, or — as on the developer's own home Wi-Fi — one network that keeps its devices apart. For those, the sending device switches to **relay mode** on its own (§5) — nobody has to press anything: the files go end-to-end encrypted through the app's existing temporary storage, inside the same session, with nothing to share by hand. It works on any network that can open the website, costs nothing within the free plans, and the app says in plain language that it is happening. Files too large for relay mode get one more direct attempt automatically; only when nothing works do both devices explain why, together, and offer **Try again** without a new code. An optional TURN relay can still be added; it is off by default because relays cost bandwidth.
 
 ---
 
 ## 1. Diagnosis
+
+### "Sometimes you have to press something on both devices" (18 October 2026)
+
+Report: during connecting, users sometimes had to click an extra element on both devices for the transfer to work; otherwise an error appeared and the transfer failed.
+
+- **What the extra click was.** Whenever a direct attempt failed, `QuickSession.connectionFailed()` put **both** devices into a terminal `failed` state ("Couldn’t connect the devices") and waited for a person to choose the way forward: **Send through preprati.** on the sending device, or **Try again** on either. The recovery itself already worked — relay mode, a fresh attempt — but it was wired to buttons instead of to the connection lifecycle. Nothing moved on until someone pressed one.
+- **Why it happened "sometimes".** Whether a direct path exists depends on the two networks: the developer's own home network is a strict NAT, which can't connect directly to a typical router or to most mobile carriers (NAT lab scenario 2), and two devices on one Wi-Fi depend on local discovery that some routers and phones drop. So some pairs connected at once, and others always hit the failure — the same devices on different networks behaved differently.
+- **Ruled out by measurement.** Signaling and the negotiation order are not the cause: 16 back-to-back sessions over HTTP signaling with injected latency (up to 1.5 s per request, and a 1.2–3 s cold start on the first requests) all connected on the first attempt, without clicks. Production signaling answered in about 0.2 s per request (1.7 s for the first, cold one).
+- **Fixed:** a failed attempt now recovers on its own (§4): the sender switches to relay mode when the server and the files allow it, or else makes one more direct attempt; the receiver shows "trying another way" instead of an error and tells the sender its side failed (`attempt-failed`), so a sender whose browser is still checking moves on at once; and when nothing is left to try, the sender says so (`gave-up`) and both devices explain the failure at the same moment. In the NAT lab, scenarios 2, 3 and 8 — which used to end in an error on both devices after ~17.5 s — now deliver the files through preprati. with no error and no click besides Accept (§9).
 
 ### Laptop and phone on the same Wi-Fi (12 October 2026, evening)
 
@@ -52,7 +61,7 @@ What was checked, and what was found:
 1. Both devices reach the signaling API over HTTPS, which works from any network.
 2. Each browser asks the STUN servers for its public address (a "server-reflexive candidate") and sends its candidates to the other device through signaling.
 3. ICE tries every pair of candidates. On typical routers, both sides sending to each other opens a path ("hole punching"), and the files then travel directly, encrypted.
-4. When no pair works, the attempt fails after about 15–30 s with an explanation (§4), and the sender can switch to relay mode (§5) — also earlier, while the attempt is still dragging on.
+4. When no pair works, the attempt fails after about 15–30 s, and the sending device switches to relay mode on its own (§4, §5) — or earlier, if the sender chooses it while the attempt drags on.
 
 The server sees device labels, WebRTC negotiation and, in relay mode, ciphertext only — never file names, contents or keys.
 
@@ -60,17 +69,18 @@ The server sees device labels, WebRTC negotiation and, in relay mode, ciphertext
 
 Verified in the NAT lab (§8) with the production build in real Chrome:
 
-| Device A                               | Device B                                   | Result                                                                                              |
-| -------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| Same Wi-Fi, devices can see each other | Same Wi-Fi                                 | **Direct** (local candidates)                                                                       |
-| Same Wi-Fi that keeps devices apart    | Same Wi-Fi                                 | Direct only if the router loops traffic back (not with a strict NAT); else **relay mode** · _lab 8_ |
-| Home router                            | Home router (another city)                 | **Direct** through STUN · _lab 1, 7_                                                                |
-| Home router                            | Mobile data, carrier with a "friendly" NAT | **Direct** through STUN (many carriers)                                                             |
-| Home router                            | Strict / symmetric NAT (some carriers)     | Not directly: explained, "Try again", **relay mode** · _lab 2, 9_                                   |
-| Network that blocks UDP                | Anything                                   | Not directly: explained, naming which device's network; **relay mode** · _lab 3_                    |
-| Strict NAT                             | Strict NAT                                 | Not directly: **relay mode**, or the optional TURN relay · _lab 6_                                  |
-| Network changes mid-transfer           |                                            | **Repaired** by ICE restart; the transfer continues · _lab 5_                                       |
-| Moves to another network, retry        |                                            | **"Try again"** reconnects the same devices, no new code · _lab 4_                                  |
+| Device A                                | Device B                                   | Result                                                                                                             |
+| --------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Same Wi-Fi, devices can see each other  | Same Wi-Fi                                 | **Direct** (local candidates)                                                                                      |
+| Same Wi-Fi that keeps devices apart     | Same Wi-Fi                                 | Direct only if the router loops traffic back (not with a strict NAT); else **relay mode**, automatically · _lab 8_ |
+| Home router                             | Home router (another city)                 | **Direct** through STUN · _lab 1, 7_                                                                               |
+| Home router                             | Mobile data, carrier with a "friendly" NAT | **Direct** through STUN (many carriers)                                                                            |
+| Home router                             | Strict / symmetric NAT (some carriers)     | Not directly: **relay mode**, automatically · _lab 2_                                                              |
+| Network that blocks UDP                 | Anything                                   | Not directly: **relay mode**, automatically · _lab 3_                                                              |
+| Strict NAT                              | Strict NAT                                 | Not directly: **relay mode**, automatically, or the optional TURN relay · _lab 6_                                  |
+| A brief outage during the first attempt |                                            | The automatic second attempt connects **directly** · _lab 9_                                                       |
+| Network changes mid-transfer            |                                            | **Repaired** by ICE restart; the transfer continues · _lab 5_                                                      |
+| Moves to another network, retry         |                                            | **"Try again"** reconnects the same devices, no new code · _lab 4_                                                 |
 
 Relay mode works wherever both devices can open the website; it is limited by the size and budget of the temporary storage (§5).
 
@@ -78,7 +88,14 @@ Mobile networks differ by carrier and even by region. Whether a given phone on m
 
 ## 4. When a direct connection isn't possible
 
-The app tells the user what happened, in English or Macedonian, and what to do:
+**First, the app recovers on its own.** Nobody has to press anything when a direct attempt fails:
+
+- **The sending device switches to relay mode** (§5) when the server stores packages and the chosen files fit its limits. Both devices say so: "A direct connection wasn’t possible, so the files will go through preprati. — encrypted so that only the two devices can open them." The receiver still accepts or declines the files as usual; nothing is uploaded before it accepts.
+- **Otherwise it makes one more direct attempt** after a second (files over the relay limit, or a server without share storage), which helps when the first one failed for a passing reason.
+- **The receiving device** shows "The direct connection didn’t work, so preprati. is trying another way. You don’t need to do anything." and tells the sender its side failed, so a sender whose browser is still checking (some keep going for 30 s) moves on at once. It waits up to 30 s for the sender's next step.
+- While a direct attempt is still trying, the slow note says "If the devices can’t connect directly, preprati. switches to another way on its own." The sender can also choose **Send through preprati. instead** right away; it's optional.
+
+**Only when that doesn't work either** — the files are too large for relay mode and the automatic attempt failed too, or the other device never answered — does the failure show, on both devices at the same moment (the sender tells the receiver it gave up). The app then tells the user what happened, in English or Macedonian, and what to do:
 
 | Cause (from what both devices found)              | Message (abridged)                                                                                                                                                                                |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -91,9 +108,9 @@ The app tells the user what happened, in English or Macedonian, and what to do:
 
 Then:
 
-- **Send through preprati.** (the sender's device) sends the chosen files through relay mode (§5), with a note on what that means: "The files are encrypted on this device first. preprati. keeps them only until _the other device_ has them, and never longer than 24 hours." The receiver sees "Or, on _the sender's device_, choose “Send through preprati.” — it works on any network." While a direct attempt is still trying (after 8 s), the sender can choose **Send through preprati. instead** right away.
-- **Try again** reconnects the same two devices directly, without a new code, up to 5 retries per session. Use it after moving one device to another network (for example, turning Wi-Fi off on a phone).
-- **Send as a link instead** (sender) appears when relay mode is no longer possible because the other device left. It moves the chosen files to Share Files without choosing them again.
+- **Send through preprati.** (the sender's device, when relay mode is still possible, e.g. after removing some files) sends the chosen files through relay mode (§5), with a note on what that means: "The files are encrypted on this device first. preprati. keeps them only until _the other device_ has them, and never longer than 24 hours."
+- **Try again** reconnects the same two devices directly, without a new code (up to 6 attempts per session, automatic ones included), and starts the automatic steps afresh. Use it after moving one device to another network (for example, turning Wi-Fi off on a phone).
+- **Send as a link instead** (sender) appears when relay mode is no longer possible because the other device left — also when it left before the files got there. It moves the chosen files to Share Files without choosing them again.
 - **Connection details** shows, without any addresses, what each device found: public address found or not, strict NAT detected, whether both are on the same network, whether a relay is set up, and how long the attempt ran.
 
 If an established connection drops, both devices show "Connection interrupted. Reconnecting…" while ICE restarts (up to two restarts per drop, within 45 s); after that the connection counts as lost. A page that comes back to the foreground (phones pause background pages) repairs a dropped connection right away, and while a session is live the app keeps a phone's screen on (Screen Wake Lock; released five minutes after the last visible change, and whenever the page is hidden).
@@ -116,11 +133,11 @@ If "Connection details" says **"Public address found (strict NAT)"** for _this d
 1. **Guest Wi-Fi or "AP/client isolation".** Put both devices on the main network, or turn isolation off in the router.
 2. **A VPN** (or iCloud Private Relay / "Limit IP address tracking" on an iPhone) on either device. Pause it for the transfer.
 3. **Laptop on cable, phone on Wi-Fi**, on routers that don't pass local discovery (multicast) between the two. Try both on Wi-Fi.
-4. Otherwise: **Send through preprati.** works regardless.
+4. Otherwise: the files go through preprati. automatically (relay mode), which works regardless.
 
 ## 5. Relay mode: "Send through preprati."
 
-When the devices can't connect directly, the files can still go through preprati. itself, without TURN and without anything new to pay for. Relay mode reuses the encrypted package format and the temporary storage of Share Files (Vercel Blob in production), but inside the Quick Transfer session: no link to copy, the receiver accepts or declines as usual, and the files land in the same "Received files" list.
+When the devices can't connect directly, the files can still go through preprati. itself, without TURN and without anything new to pay for — and the sending device switches to it on its own (§4). Relay mode reuses the encrypted package format and the temporary storage of Share Files (Vercel Blob in production), but inside the Quick Transfer session: no link to copy, the receiver accepts or declines as usual, and the files land in the same "Received files" list.
 
 ```
  sender                              preprati.                              receiver
@@ -207,7 +224,8 @@ Every poll is one Vercel function call and about 4 Upstash Redis commands. The U
 | --------------------------------------- | ------------------------------------------------ |
 | Messages flowing (pairing, negotiation) | 0.4 s (for 6 s after the last message)           |
 | Waiting for the other device            | 1.5 s (the code expires after 10 min)            |
-| After a failed attempt                  | 5 s, for at most 5 minutes ("Try again")         |
+| Recovering from a failed attempt        | 1.5 s (0.4 s while messages flow), at most ~30 s |
+| After a failure is shown                | 5 s, for at most 5 minutes ("Try again")         |
 | Devices connected directly              | 15 s (presence only; 0.4 s again during repairs) |
 | Relay mode, idle / offer pending        | 5 s / 1.5 s                                      |
 | Relay mode, transfer running            | 1 s (progress reports)                           |
@@ -221,8 +239,9 @@ Roughly: a 10-minute session costs about 600 commands (≈ 800 such sessions a m
 1. Open the deployed app (`https://preprati.vercel.app`) on a laptop on home Wi-Fi.
 2. On a phone, **turn Wi-Fi off** (mobile data only), scan the QR code, and send a file.
 3. Check the badge: "Direct connection" means STUN worked across the two networks.
-4. If it fails, open **Connection details** and note what each device found. Try **Try again** after switching networks, a phone hotspot, a friend's network or another carrier, and **Send through preprati.** on the sending device.
+4. If it can't connect directly, the badge says "Through preprati." after about 20 s, without any button in between (and "Connection details" is shown only if even that fails). To test direct connections specifically, try again after switching networks, a phone hotspot, a friend's network or another carrier.
 5. For a network change mid-transfer, start a large transfer on Wi-Fi, then turn Wi-Fi off on the phone. Expect "Reconnecting…" and then the transfer continuing.
+6. **To follow a session afterwards**, the server log has its lifecycle under one short tag: `npx vercel@63.1.2 logs --environment production --since 1h --json`, then look for `"msg":"signaling"` entries (`session-created`, `device-joined`, `recovery` with `step` `attempt-failed` / `relay-proposed` / `relay-accepted` / `retry` / `gave-up`, `peer-left`). They contain no ids, codes, labels or addresses.
 
 **Local development can't test this.** `npm run dev` and `npm run dev:lan` serve only your computer and your local network (with a self-signed certificate for phones). Devices on other networks can't reach that signaling server, even with STUN. Test cross-network behaviour against a public deployment (production or a Vercel preview deployment), not with temporary tunnel addresses written into configuration.
 
@@ -234,19 +253,19 @@ scripts/nat-lab/lab.sh scenarios   # 1–9 below, or e.g. `scenarios 2 5`
 scripts/nat-lab/lab.sh down        # removes everything it created
 ```
 
-Results from 12 October 2026 (current code; every transferred file byte-identical; the lab server stores relay packages in `test-results/nat-lab/shares`):
+Results from 18 October 2026 (current code; every transferred file byte-identical; the lab server stores relay packages in `test-results/nat-lab/shares`). "No click" means nothing was pressed to get connected — only choosing and sending the file, and Accept; each device also records whether an error was ever on screen:
 
-| #   | Scenario                                                    | Result                                                                                                                                                            |
-| --- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Two home routers, HTTP signaling (as on Vercel)             | Direct connection in ~0.5 s of ICE; 2 MB transferred                                                                                                              |
-| 2   | Home router ↔ strict NAT, no relay                          | Fails in ~16 s with "networks don't allow a direct connection"; strict NAT correctly attributed to the device behind it                                           |
-| 3   | UDP blocked on A                                            | A: "This device's network blocks…"; B: "The other device's network blocks…"                                                                                       |
-| 4   | Strict NAT fails → B moves to a home network → "Try again"  | Reconnected directly within ~5 s, same session and code, file transferred                                                                                         |
-| 5   | A gets a new public address mid-transfer (30 MB, throttled) | Both showed "Reconnecting…"; ICE restart reconnected ~4 s after the drop was detected; transfer completed                                                         |
-| 6   | Strict NAT on both sides, coturn configured                 | "Relayed connection", transfer completed                                                                                                                          |
-| 7   | Two home routers, WebSocket signaling (self-hosted server)  | Direct connection, transfer completed                                                                                                                             |
-| 8   | Both devices on one strict-NAT Wi-Fi that keeps them apart  | Fails in ~18 s with "Both devices are on the same network, but it doesn't let them connect…"; "Send through preprati." delivered 3 MB ~8 s later, package deleted |
-| 9   | Home router ↔ strict NAT, no TURN, relay mode               | "Send through preprati." delivered 3 MB                                                                                                                           |
+| #   | Scenario                                                      | Result                                                                                                                                                           |
+| --- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Two home routers, HTTP signaling (as on Vercel)               | Direct connection after ~3 s; 2 MB transferred; no click                                                                                                         |
+| 2   | Home router ↔ strict NAT, no TURN                             | Direct attempt fails at ~18 s; relay mode by itself, "Through preprati." at 18.5 s, file received at 20.7 s; no error shown, no click (before: an error on both) |
+| 3   | UDP blocked on A                                              | A noticed first and told B; "Through preprati." at 19.4 s (33 s before B was told), file received at 22.4 s; no error, no click                                  |
+| 4   | No relay mode: strict NAT fails twice → B moves → "Try again" | Automatic second attempt fails too; both devices show the error together at 34.8 s; "Try again" reconnects directly in ~1.5 s, same session and code             |
+| 5   | A gets a new public address mid-transfer (30 MB, throttled)   | Both showed "Reconnecting…"; ICE restart reconnected; transfer completed                                                                                         |
+| 6   | Strict NAT on both sides, coturn configured                   | "Relayed connection", transfer completed                                                                                                                         |
+| 7   | Two home routers, WebSocket signaling (self-hosted server)    | Direct connection, transfer completed                                                                                                                            |
+| 8   | Both devices on one strict-NAT Wi-Fi that keeps them apart    | "Through preprati." by itself at 18.4 s, 3 MB received at 20.7 s, package deleted; no error, no click (before: an error on both at ~18 s, then a click)          |
+| 9   | No relay mode: B's network drops UDP during the first attempt | The automatic second attempt connected **directly** at 20.5 s; no error, no click                                                                                |
 
 The lab mounts the host filesystem read-only into its containers and chroots into it, to run the host's own Node and Chrome inside the lab's network namespaces as your user. Results land in `test-results/nat-lab/`.
 
